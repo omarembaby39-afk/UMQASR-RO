@@ -15,6 +15,14 @@ DB = "ro_uaq.db"
 # ----------------- BASIC DB CONNECTION -----------------
 def conn():
     return sqlite3.connect(DB, check_same_thread=False)
+def get_db_mode():
+    url_str = str(engine.url)
+    if "neon.tech" in url_str:
+        return "Neon PostgreSQL (Cloud)"
+    elif "sqlite" in url_str:
+        return "Local SQLite file"
+    else:
+        return url_str
 
 # ----------------- BACKUP SYSTEM -----------------------
 def backup_db_if_needed():
@@ -967,6 +975,11 @@ def page_maintenance_report():
 
 # ---------------------- MAIN ENTRY POINT ----------------------
 def main():
+    def main():
+    st.set_page_config(layout="wide", page_title="RO - Um Qasr Port (Cloud DB)")
+    st.sidebar.markdown(f"**DB Mode:** {get_db_mode()}")
+    ...
+
     st.set_page_config(layout="wide", page_title="RO - Um Qasr Port")
 
     menu = st.sidebar.radio(
