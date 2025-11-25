@@ -489,19 +489,6 @@ def compute_compliance(df):
     return round(compliance, 1), good_days, bad_days
 
 
-# Override previous version (fix SQL typo)
-def get_cartridge():
-    conn = get_conn()
-    if not conn:
-        return pd.DataFrame()
-    df = pd.read_sql("SELECT * FROM cartridge ORDER BY d", conn)
-    conn.close()
-    if len(df) > 0:
-       df["d"] = pd.to_datetime(df["d"], errors="coerce")
-df = df[df["d"].notna()]
-    return df
-
-
 # ============================================================
 # 9) PAGE – ADD DAILY READING (EMERALD UI)
 # ============================================================
