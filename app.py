@@ -262,11 +262,18 @@ def record_chemical_movement(d, name, mov, qty, remarks):
     # Update stock
     if mov == "IN":
         cur.execute("UPDATE chemicals SET qty = qty + %s WHERE name = %s", (qty, name))
+      if len(chem_df) == 0:
+        st.info("No chemicals found in database.")
     else:
-        cur.execute("UPDATE chemicals SET qty = GREATEST(qty - %s, 0) WHERE name = %s", (qty, name))
+        # Make sure qty and unit_cost are numeric
+        chem_df = chem_df.copy()
+        chem_df["qty"] = pd.to_numeric(chem_df["qty"], errors="coerce").fillna(0)
+        chem_df["unit_cost"] = pd.to_numeric(chem_df["unit_cost"], errors="coerce").fillna(0)
 
-    conn.commit()
-    conn.close()
+        disp = chem_df.copy()
+        disp["stock_value"] = disp["qty"] * disp["unit_cost"]
+
+        st.dataframe(disp, use_container_width=True)
 
 
 def get_chemical_movements():
@@ -450,12 +457,18 @@ def page_dashboard():
 
     section_title("Chemical Stock Levels")
 
-    if len(chem) == 0:
-        st.info("No chemicals found.")
+    if len(chem_df) == 0:
+        st.info("No chemicals found in database.")
     else:
-        df_disp = chem.copy()
-        df_disp["stock_value"] = df_disp["qty"] * df_disp["unit_cost"]
-        st.dataframe(df_disp, use_container_width=True)
+        # Make sure qty and unit_cost are numeric
+        chem_df = chem_df.copy()
+        chem_df["qty"] = pd.to_numeric(chem_df["qty"], errors="coerce").fillna(0)
+        chem_df["unit_cost"] = pd.to_numeric(chem_df["unit_cost"], errors="coerce").fillna(0)
+
+        disp = chem_df.copy()
+        disp["stock_value"] = disp["qty"] * disp["unit_cost"]
+
+        st.dataframe(disp, use_container_width=True)
 
         for _, row in chem.iterrows():
             nm = row["name"]
