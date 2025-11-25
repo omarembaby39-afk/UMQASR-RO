@@ -119,6 +119,17 @@ def get_chemical_movements():
         df = df[df["d"].notna()]
     return df
 
+@st.cache_data(ttl=60)
+def get_cartridge():
+    conn = get_conn()
+    df = pd.read_sql("SELECT * FROM cartridge ORDER BY d", conn)
+    conn.close()
+    if len(df) > 0:
+        df["d"] = pd.to_datetime(df["d"], errors="coerce")
+        df = df[df["d"].notna()]
+    return df
+
+
 # -----------------------------
 # UI HELPERS
 # -----------------------------
@@ -214,7 +225,25 @@ def page_dashboard():
     else:
         df_disp = chems.copy()
         df_disp["stock_value"] = df_disp["qty"] * df_disp["unit_cost"]
-        st.dataframe(df_disp, use_container_width=True)
+
+        edited_chem = st.data_editor(df_disp, num_rows="dynamic", key="chem_editor", use_container_width=True)
+        if st.button("💾 Save Chemical Table Changes"):
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM chemicals;")
+            for _, r in edited_chem.iterrows():
+                cur.execute(
+                    "INSERT INTO chemicals (name, qty, unit_cost) VALUES (%s, %s, %s)",
+                    (r["name"], float(r.get("qty") or 0), float(r.get("unit_cost") or 0)),
+                )
+            conn.commit()
+            cur.close()
+            conn.close()
+            st.success("Chemical stock table updated.")
+            st.cache_data.clear()
+            chems = get_chemicals()
+            df_disp = chems.copy()
+            df_disp["stock_value"] = df_disp["qty"] * df_disp["unit_cost"]
 
         for _, row in chems.iterrows():
             nm = row["name"]
@@ -262,6 +291,119 @@ def page_dashboard():
             plt.xticks(rotation=45)
             st.pyplot(fig)
 
+
+
+# -----------------------------
+# CARTRIDGE FILTER PAGE
+# -----------------------------
+def page_cartridge():
+    st.title("🧱 Cartridge Filter – Differential Pressure & Status")
+
+    cart = get_cartridge()
+
+    # Quick status from latest record
+    last_dp = None
+    last_change_date = None
+    if len(cart) > 0:
+        last_row = cart.sort_values("d").iloc[-1]
+        last_dp = float(last_row.get("dp") or 0)
+        if int(last_row.get("is_change") or 0) == 1:
+            last_change_date = last_row["d"].date()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if last_dp is not None:
+            kpi_card("Latest DP", f"{last_dp:.2f} bar")
+        else:
+            kpi_card("Latest DP", "N/A")
+    with col2:
+        if last_change_date:
+            kpi_card("Last Filter Change", f"{last_change_date:%Y-%m-%d}")
+        else:
+            kpi_card("Last Filter Change", "No change recorded")
+    with col3:
+        if last_dp is not None:
+            if last_dp >= 1.5:
+                kpi_card("Status", "CHANGE NOW", "DP ≥ 1.5 bar – replace cartridge")
+                st.error("Cartridge DP is high – change required.")
+            elif last_dp >= 1.0:
+                kpi_card("Status", "Monitor", "DP between 1.0 and 1.5 bar")
+                st.warning("Cartridge DP elevated – monitor closely.")
+            else:
+                kpi_card("Status", "OK", "DP below 1.0 bar")
+        else:
+            kpi_card("Status", "Unknown")
+
+    st.markdown("---")
+
+    # Add new reading form
+    st.subheader("Add New Cartridge DP Reading")
+    with st.form("add_cart_reading"):
+        c1, c2 = st.columns(2)
+        with c1:
+            d = st.date_input("Date", value=datetime.now().date())
+            dp = st.number_input("Differential Pressure (bar)", min_value=0.0, max_value=10.0, value=0.0, step=0.1)
+        with c2:
+            is_change = st.checkbox("Filter changed in this reading?")
+            change_cost = st.number_input("Change Cost", min_value=0.0, value=0.0, step=1.0)
+        remarks = st.text_input("Remarks", "")
+        submitted = st.form_submit_button("Save Reading")
+
+    if submitted:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO cartridge (d, dp, remarks, is_change, change_cost) VALUES (%s, %s, %s, %s, %s)",
+            (d, dp, remarks, 1 if is_change else 0, change_cost),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        st.success("Cartridge reading saved.")
+        st.cache_data.clear()
+
+    st.markdown("---")
+
+    # Chart of DP over time
+    st.subheader("DP Trend")
+    cart = get_cartridge()
+    if len(cart) == 0:
+        st.info("No cartridge records yet.")
+    else:
+        fig, ax = plt.subplots(figsize=(8, 3))
+        ax.plot(cart["d"], cart["dp"], marker="o", markersize=3)
+        ax.set_xlabel("Date")
+        ax.set_ylabel("DP (bar)")
+        ax.set_title("Cartridge Differential Pressure Over Time")
+        ax.grid(alpha=0.3)
+        plt.xticks(rotation=45)
+        st.pyplot(fig)
+
+        st.subheader("Edit Cartridge Records")
+        editable = cart.copy()
+        editable["d"] = editable["d"].dt.date
+        edited = st.data_editor(editable, num_rows="dynamic", key="cart_editor", use_container_width=True)
+        if st.button("💾 Save Cartridge Table Changes"):
+            conn = get_conn()
+            cur = conn.cursor()
+            # update by id; assume id exists
+            for _, row in edited.iterrows():
+                cur.execute(
+                    "UPDATE cartridge SET d=%s, dp=%s, remarks=%s, is_change=%s, change_cost=%s WHERE id=%s",
+                    (
+                        row["d"],
+                        float(row.get("dp") or 0),
+                        row.get("remarks") or "",
+                        int(row.get("is_change") or 0),
+                        float(row.get("change_cost") or 0),
+                        int(row["id"]),
+                    ),
+                )
+            conn.commit()
+            cur.close()
+            conn.close()
+            st.success("Cartridge table updated.")
+            st.cache_data.clear()
 # -----------------------------
 # MONTHLY REPORT PAGE
 # -----------------------------
@@ -278,11 +420,7 @@ def page_monthly_report():
     months = sorted(readings["month"].unique())
     month = st.selectbox("Select month", months, index=len(months)-1)
 
-    df_m = readings[readings["month"] == month].copy()
-    if len(df_m) == 0:
-        st.info("No readings for this month.")
-        return
-
+    # compute month range
     year, mon = map(int, month.split("-"))
     month_start = datetime(year, mon, 1)
     if mon == 12:
@@ -291,11 +429,32 @@ def page_monthly_report():
         next_month = datetime(year, mon+1, 1)
     month_end = next_month - timedelta(days=1)
 
+    # date range filter inside month
+    st.write("Filter readings within the selected month:")
+    start_date, end_date = st.date_input(
+        "Date range",
+        value=(month_start.date(), month_end.date()),
+        min_value=month_start.date(),
+        max_value=month_end.date(),
+    )
+
+    df_m = readings[readings["month"] == month].copy()
+    if len(df_m) == 0:
+        st.info("No readings for this month.")
+        return
+
+    # apply range filter
+    df_m = df_m[(df_m["d"].dt.date >= start_date) & (df_m["d"].dt.date <= end_date)]
+
+    if len(df_m) == 0:
+        st.info("No readings in this date range.")
+        return
+
     col1, col2, col3, col4 = st.columns(4)
     total_prod = float(df_m["production"].sum()) if "production" in df_m else 0.0
     avg_tds = df_m["tds"].mean() if "tds" in df_m else 0.0
     avg_ph = df_m["ph"].mean() if "ph" in df_m else 0.0
-    days = (month_end - month_start).days + 1
+    days_span = (end_date - start_date).days + 1
 
     with col1:
         kpi_card("Total Production", f"{total_prod:.1f} m³", f"{month_start:%b %Y}")
@@ -304,10 +463,31 @@ def page_monthly_report():
     with col3:
         kpi_card("Avg pH", f"{avg_ph:.2f}")
     with col4:
-        kpi_card("Days in Month", f"{days}")
+        kpi_card("Days in Range", f"{days_span}")
 
     st.markdown("---")
 
+    # Trend chart with small markers
+    section_title("Quality Trend (TDS & pH)")
+    fig, ax1 = plt.subplots(figsize=(8,3))
+    ax1.plot(df_m["d"], df_m["tds"], marker="o", markersize=3, label="TDS (ppm)")
+    ax1.set_ylabel("TDS (ppm)")
+    ax1.grid(alpha=0.3)
+
+    ax2 = ax1.twinx()
+    ax2.plot(df_m["d"], df_m["ph"], marker="s", markersize=3, linestyle="--", label="pH", color="#3b82f6")
+    ax2.set_ylabel("pH")
+
+    fig.autofmt_xdate()
+    ax1.set_xlabel("Date")
+    ax1.set_title("TDS & pH vs Date (Small Markers)")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1+lines2, labels1+labels2, loc="upper right")
+    st.pyplot(fig)
+
+    # Daily details
     section_title("Daily Details (Existing Readings)")
     st.dataframe(
         df_m[
@@ -316,35 +496,248 @@ def page_monthly_report():
         use_container_width=True,
     )
 
-    section_title("Monthly Reading Matrix (1–31) – TDS / pH / Conductivity")
+    # Maintenance summary
+    section_title("Maintenance & Notes Summary")
+    maint = df_m[
+        df_m["maintenance"].astype(str).str.strip() != ""
+    ][["d", "maintenance", "notes"]].copy()
+    if len(maint) == 0:
+        st.info("No maintenance records in this period.")
+    else:
+        st.dataframe(maint, use_container_width=True)
+
+    # Monthly reading matrix (full month 1–31)
+    section_title("Monthly Reading Matrix (1–31) – TDS / pH / Conductivity (Full Month)")
 
     all_days = pd.date_range(month_start, month_end, freq="D")
-    base = pd.DataFrame({"d": all_days})
+    base = pd.DataFrame({{"d": all_days}})
 
-    if len(df_m) > 0:
-        daily_simple = df_m[["d", "tds", "ph", "conductivity"]].copy()
+    full_month = readings[readings["month"] == month].copy()
+    if len(full_month) > 0:
+        daily_simple = full_month[["d", "tds", "ph", "conductivity"]].copy()
     else:
         daily_simple = pd.DataFrame(columns=["d", "tds", "ph", "conductivity"])
 
     matrix = base.merge(daily_simple, on="d", how="left").sort_values("d")
     matrix.rename(
-        columns={"d": "Date", "tds": "TDS (ppm)", "ph": "pH", "conductivity": "Conductivity (µS/cm)"},
+        columns={{"d": "Date", "tds": "TDS (ppm)", "ph": "pH", "conductivity": "Conductivity (µS/cm)"}},
         inplace=True,
     )
     st.dataframe(matrix, use_container_width=True)
 
+    # Excel export with safe fallback if xlsxwriter missing
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        matrix.to_excel(writer, index=False, sheet_name="Readings_1_31")
-    excel_data = output.getvalue()
+    excel_data = None
+    try:
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            matrix.to_excel(writer, index=False, sheet_name="Readings_1_31")
+        excel_data = output.getvalue()
+    except ImportError:
+        st.error("Excel export requires the 'xlsxwriter' package. Please add it to requirements.txt.")
 
-    st.download_button(
-        label="⬇ Download Monthly Reading Excel (1–31)",
-        data=excel_data,
-        file_name=f"RO_Readings_{month}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    if excel_data:
+        st.download_button(
+            label="⬇ Download Monthly Reading Excel (1–31)",
+            data=excel_data,
+            file_name=f"RO_Readings_{month}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
+
+
+# -----------------------------
+# DAILY READINGS PAGE
+# -----------------------------
+def page_readings():
+    st.title("🧾 Daily RO Readings")
+
+    df = get_readings()
+
+    # Entry form
+    st.subheader("Add / Update Reading")
+    with st.form("add_reading_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            d = st.date_input("Date", value=datetime.now().date())
+            tds = st.number_input("TDS (ppm)", min_value=0.0, step=1.0)
+        with c2:
+            ph = st.number_input("pH", min_value=0.0, max_value=14.0, step=0.1)
+            cond = st.number_input("Conductivity (µS/cm)", min_value=0.0, step=1.0)
+        with c3:
+            flow = st.number_input("Flow (m³/h)", min_value=0.0, step=0.1)
+            prod = st.number_input("Daily Production (m³)", min_value=0.0, step=0.1)
+        maint = st.text_input("Maintenance", "")
+        notes = st.text_area("Notes", "")
+
+        submitted = st.form_submit_button("💾 Save Reading")
+    if submitted:
+        conn = get_conn()
+        cur = conn.cursor()
+        # If a reading already exists for that date, update it, else insert
+        cur.execute("SELECT id FROM readings WHERE d=%s", (d,))
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                """
+                UPDATE readings
+                SET tds=%s, ph=%s, conductivity=%s, flow_m3=%s, production=%s,
+                    maintenance=%s, notes=%s
+                WHERE id=%s
+                """,
+                (tds, ph, cond, flow, prod, maint, notes, row[0]),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO readings
+                    (d, tds, ph, conductivity, flow_m3, production, maintenance, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (d, tds, ph, cond, flow, prod, maint, notes),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+        st.success("Reading saved.")
+        st.cache_data.clear()
+
+    st.markdown("---")
+
+    st.subheader("Edit Readings Table")
+    df = get_readings()
+    if len(df) == 0:
+        st.info("No readings found yet.")
+    else:
+        editable = df.copy()
+        editable["d"] = editable["d"].dt.date
+        edited = st.data_editor(
+            editable,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="readings_editor",
+        )
+        if st.button("💾 Save Table Changes", key="save_readings_table"):
+            conn = get_conn()
+            cur = conn.cursor()
+            for _, row in edited.iterrows():
+                cur.execute(
+                    """
+                    UPDATE readings
+                    SET d=%s, tds=%s, ph=%s, conductivity=%s, flow_m3=%s,
+                        production=%s, maintenance=%s, notes=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        row["d"],
+                        float(row.get("tds") or 0),
+                        float(row.get("ph") or 0),
+                        float(row.get("conductivity") or 0),
+                        float(row.get("flow_m3") or 0),
+                        float(row.get("production") or 0),
+                        row.get("maintenance") or "",
+                        row.get("notes") or "",
+                        int(row["id"]),
+                    ),
+                )
+            conn.commit()
+            cur.close()
+            conn.close()
+            st.success("Readings table updated.")
+            st.cache_data.clear()
+
+
+# -----------------------------
+# CHEMICAL MOVEMENTS PAGE
+# -----------------------------
+def page_chem_movements():
+    st.title("🧪 Chemical Movements (IN / OUT)")
+
+    chem_df = get_chemicals()
+    mov_df = get_chemical_movements()
+
+    # Entry form
+    st.subheader("Record Chemical Movement")
+    with st.form("chem_movement_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            d = st.date_input("Date", value=datetime.now().date(), key="chem_date")
+            if len(chem_df) > 0:
+                name = st.selectbox("Chemical", chem_df["name"].tolist())
+            else:
+                name = st.text_input("Chemical Name (no chemicals in DB)")
+        with c2:
+            movement_type = st.selectbox("Movement Type", ["IN", "OUT"])
+            qty = st.number_input("Quantity (kg)", min_value=0.0, step=0.1)
+        with c3:
+            remarks = st.text_input("Remarks", "")
+
+        submitted = st.form_submit_button("💾 Save Movement")
+    if submitted:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO chemical_movements (d, name, movement_type, qty, remarks)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            (d, name, movement_type, qty, remarks),
+        )
+        # update stock
+        if movement_type == "IN":
+            cur.execute(
+                "UPDATE chemicals SET qty = qty + %s WHERE name=%s",
+                (qty, name),
+            )
+        else:
+            cur.execute(
+                "UPDATE chemicals SET qty = qty - %s WHERE name=%s",
+                (qty, name),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+        st.success("Chemical movement recorded and stock updated.")
+        st.cache_data.clear()
+
+    st.markdown("---")
+
+    st.subheader("Edit Movements Table")
+    mov_df = get_chemical_movements()
+    if len(mov_df) == 0:
+        st.info("No movements found yet.")
+    else:
+        editable = mov_df.copy()
+        editable["d"] = editable["d"].dt.date
+        edited = st.data_editor(
+            editable,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="movements_editor",
+        )
+        if st.button("💾 Save Movements Table Changes", key="save_movements_table"):
+            conn = get_conn()
+            cur = conn.cursor()
+            for _, row in edited.iterrows():
+                cur.execute(
+                    """
+                    UPDATE chemical_movements
+                    SET d=%s, name=%s, movement_type=%s, qty=%s, remarks=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        row["d"],
+                        row["name"],
+                        row["movement_type"],
+                        float(row.get("qty") or 0),
+                        row.get("remarks") or "",
+                        int(row["id"]),
+                    ),
+                )
+            conn.commit()
+            cur.close()
+            conn.close()
+            st.success("Chemical movements updated.")
+            st.cache_data.clear()
 # -----------------------------
 # MAIN
 # -----------------------------
@@ -352,12 +745,18 @@ def main():
     init_db()
 
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Dashboard", "Monthly Report"])
+    page = st.sidebar.radio("Go to", ["Dashboard", "Monthly Report", "Cartridge Filter", "Readings", "Chemical Movements"])
 
     if page == "Dashboard":
         page_dashboard()
-    else:
+    elif page == "Monthly Report":
         page_monthly_report()
+    elif page == "Cartridge Filter":
+        page_cartridge()
+    elif page == "Readings":
+        page_readings()
+    else:
+        page_chem_movements()
 
 if __name__ == "__main__":
     main()
