@@ -1,41 +1,117 @@
+# ============================================================
+#   NPS – RO SYSTEM (UM QASR) – PROFESSIONAL EMERALD GREEN UI
+#   Backend: Neon PostgreSQL | Frontend: Streamlit Pro Layout
+#   PART 1 / 4
+# ============================================================
+
 import streamlit as st
-import pandas as pd
-import numpy as np
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime, timedelta
+from datetime import datetime, date
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-import io
+from fpdf import FPDF
+import os
 
-st.set_page_config(page_title="RO Um Qasr – Neon", layout="wide")
+# ============================================================
+# 1) GLOBAL SETTINGS – EMERALD GREEN THEME
+# ============================================================
 
-# -----------------------------
-# CONFIG / CONSTANTS
-# -----------------------------
-DB_URL = "postgresql://neondb_owner:npg_C4ghxK1yUcfw@ep-billowing-fog-agxbr2fc-pooler.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-PLANT_CAPACITY = 10  # m3/day
+EMERALD_GREEN = "#1ABC9C"
+DARK_GREEN = "#0E6655"
+LIGHT_BG = "#ECF8F6"
+WHITE = "#FFFFFF"
+GREY = "#666666"
 
-MIN_STOCK = {
-    "Sodium Hypochlorite (Chlorine)": 50,
-    "Hydrochloric Acid (HCL)": 30,
-    "Antiscalant PC-391": 25,
-}
+st.set_page_config(
+    page_title="NPS RO System – Um Qasr",
+    layout="wide",
+    page_icon="💧"
+)
 
-PRIMARY_COLOR = "#059669"  # emerald
-DANGER_COLOR = "#DC2626"
-WARN_COLOR = "#F97316"
+# Streamlit custom CSS theme (Emerald Corporate Green)
+st.markdown(f"""
+    <style>
+        .stApp {{
+            background-color: {LIGHT_BG} !important;
+        }}
+        .css-18ni7ap {{
+            background-color: {WHITE} !important;
+        }}
+        .stProgress > div > div {{
+            background-color: {EMERALD_GREEN} !important;
+        }}
+        .metric-card {{
+            background-color: {WHITE};
+            padding: 18px;
+            border-radius: 12px;
+            border-left: 6px solid {EMERALD_GREEN};
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            margin-bottom: 14px;
+        }}
+        .section-header {{
+            font-size: 22px;
+            font-weight: 700;
+            color: {DARK_GREEN};
+            margin-top: 20px;
+            margin-bottom: 10px;
+        }}
+        .sub-header {{
+            font-size: 16px;
+            font-weight: 600;
+            color: {GREY};
+            margin-top: 6px;
+        }}
+        .card {{
+            background: #ffffff;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 20px;
+        }}
+    </style>
+""", unsafe_allow_html=True)
 
-# -----------------------------
-# DB CONNECTION HELPERS
-# -----------------------------
+
+# ============================================================
+# 2) NEON POSTGRESQL DATABASE CONNECTION
+# ============================================================
+
+DB_URL = (
+    "postgresql://neondb_owner:"
+    "npg_C4ghxK1yUcfw@"
+    "ep-billowing-fog-agxbr2fc-pooler.c-2.eu-central-1.aws.neon.tech/"
+    "neondb?sslmode=require&channel_binding=require"
+)
+
 def get_conn():
-    return psycopg2.connect(DB_URL)
+    """Create a PostgreSQL connection with RealDict cursor."""
+    try:
+        conn = psycopg2.connect(
+            DB_URL,
+            cursor_factory=RealDictCursor,
+            connect_timeout=10,
+            sslmode="require"
+        )
+        return conn
+    except Exception as e:
+        st.error(f"❌ Database Connection Failed: {e}")
+        return None
 
-def init_db():
+
+# ============================================================
+# 3) INITIALIZE / CREATE TABLES (POSTGRESQL)
+# ============================================================
+
+def init_postgres():
     conn = get_conn()
-    conn.autocommit = True
+    if not conn:
+        return
+
     cur = conn.cursor()
-    # readings
+
+    # ---- readings table ----
     cur.execute("""
         CREATE TABLE IF NOT EXISTS readings (
             id SERIAL PRIMARY KEY,
@@ -49,7 +125,8 @@ def init_db():
             notes TEXT
         );
     """)
-    # cartridge
+
+    # ---- cartridge table ----
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cartridge (
             id SERIAL PRIMARY KEY,
@@ -60,7 +137,8 @@ def init_db():
             change_cost DOUBLE PRECISION DEFAULT 0
         );
     """)
-    # chemicals
+
+    # ---- chemicals ----
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chemicals (
             name TEXT PRIMARY KEY,
@@ -68,7 +146,18 @@ def init_db():
             unit_cost DOUBLE PRECISION DEFAULT 0
         );
     """)
-    # chemical movements
+
+    # Insert base chemicals if missing
+    cur.execute("""
+        INSERT INTO chemicals (name, qty, unit_cost)
+        VALUES
+            ('Chlorine', 0, 0),
+            ('HCL', 0, 0),
+            ('BC', 0, 0)
+        ON CONFLICT (name) DO NOTHING;
+    """)
+
+    # ---- chemical movements ----
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chemical_movements (
             id SERIAL PRIMARY KEY,
@@ -79,684 +168,985 @@ def init_db():
             remarks TEXT
         );
     """)
-    # seed chemicals if empty
-    cur.execute("SELECT COUNT(*) FROM chemicals;")
-    n = cur.fetchone()[0]
-    if n == 0:
-        cur.execute("""
-            INSERT INTO chemicals (name, qty, unit_cost) VALUES
-            ('Sodium Hypochlorite (Chlorine)', 0, 0),
-            ('Hydrochloric Acid (HCL)', 0, 0),
-            ('Antiscalant PC-391', 0, 0)
-        """)
-    cur.close()
+
+    conn.commit()
     conn.close()
 
-@st.cache_data(ttl=60)
-def get_readings():
+
+# ============================================================
+# 4) DATA ACCESS FUNCTIONS (POSTGRESQL)
+# ============================================================
+
+def add_reading(d, tds, ph, cond, flow, prod, maint, notes):
     conn = get_conn()
+    if not conn: return
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO readings (d, tds, ph, conductivity, flow_m3, production, maintenance, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (d, tds, ph, cond, flow, prod, maint, notes))
+    conn.commit()
+    conn.close()
+
+
+def get_readings():
+    """Return all daily readings as a DataFrame (sorted by date)."""
+    conn = get_conn()
+    if not conn:
+        return pd.DataFrame()
+
     df = pd.read_sql("SELECT * FROM readings ORDER BY d", conn)
     conn.close()
+
     if len(df) > 0:
         df["d"] = pd.to_datetime(df["d"], errors="coerce")
         df = df[df["d"].notna()]
+
     return df
 
-@st.cache_data(ttl=60)
-def get_chemicals():
+
+def add_cartridge(d, dp, remarks, is_change, cost):
     conn = get_conn()
-    df = pd.read_sql("SELECT * FROM chemicals ORDER BY name", conn)
+    if not conn: return
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO cartridge (d, dp, remarks, is_change, change_cost)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (d, dp, remarks, is_change, cost))
+    conn.commit()
     conn.close()
-    return df
 
-@st.cache_data(ttl=60)
-def get_chemical_movements():
-    conn = get_conn()
-    df = pd.read_sql("SELECT * FROM chemical_movements ORDER BY d", conn)
-    conn.close()
-    if len(df) > 0:
-        df["d"] = pd.to_datetime(df["d"], errors="coerce")
-        df = df[df["d"].notna()]
-    return df
 
-@st.cache_data(ttl=60)
 def get_cartridge():
+    """Return all cartridge DP records as a DataFrame sorted by date."""
     conn = get_conn()
+    if not conn:
+        return pd.DataFrame()
+
     df = pd.read_sql("SELECT * FROM cartridge ORDER BY d", conn)
     conn.close()
+
     if len(df) > 0:
         df["d"] = pd.to_datetime(df["d"], errors="coerce")
         df = df[df["d"].notna()]
+
     return df
 
 
-# -----------------------------
-# UI HELPERS
-# -----------------------------
-def kpi_card(label, value, help_text=None):
+def get_chemicals():
+    conn = get_conn()
+    if not conn: return pd.DataFrame()
+    df = pd.read_sql("SELECT * FROM chemicals", conn)
+    conn.close()
+    return df
+
+
+def update_chemical_cost(name, cost):
+    conn = get_conn()
+    if not conn: return
+    cur = conn.cursor()
+    cur.execute("UPDATE chemicals SET unit_cost = %s WHERE name = %s", (cost, name))
+    conn.commit()
+    conn.close()
+
+
+def record_chemical_movement(d, name, mov, qty, remarks):
+    conn = get_conn()
+    if not conn: return
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO chemical_movements (d, name, movement_type, qty, remarks)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (d, name, mov, qty, remarks))
+
+    # Update stock
+    if mov == "IN":
+        cur.execute("UPDATE chemicals SET qty = qty + %s WHERE name = %s", (qty, name))
+    else:
+        cur.execute("UPDATE chemicals SET qty = GREATEST(qty - %s, 0) WHERE name = %s", (qty, name))
+
+    conn.commit()
+    conn.close()
+
+
+def get_chemical_movements():
+    """Return all chemical movement records as a DataFrame sorted by date."""
+    conn = get_conn()
+    if not conn:
+        return pd.DataFrame()
+
+    df = pd.read_sql("SELECT * FROM chemical_movements ORDER BY d", conn)
+    conn.close()
+
+    if len(df) > 0:
+        df["d"] = pd.to_datetime(df["d"], errors="coerce")
+        df = df[df["d"].notna()]
+
+    return df
+
+
+def kpi_card(title, value, color=EMERALD_GREEN):
     st.markdown(
-        f"""<div style='border-radius:12px;border:1px solid #e5e7eb;padding:12px 16px;background:white'>
-        <div style='font-size:12px;color:#6b7280'>{label}</div>
-        <div style='font-size:22px;font-weight:600;color:#111827'>{value}</div>
-        {f"<div style='font-size:11px;color:#9ca3af'>{help_text}</div>" if help_text else ""}
-        </div>""",
+        f"""
+        <div class="metric-card" style="border-left-color:{color};">
+            <h4 style="margin:0; color:{GREY}; font-size:16px;">{title}</h4>
+            <h2 style="margin:0; color:{DARK_GREEN};">{value}</h2>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-def section_title(title: str):
-    st.markdown(f"### {title}")
 
-# -----------------------------
-# DASHBOARD
-# -----------------------------
-def page_dashboard():
-    readings = get_readings()
-    chems = get_chemicals()
-    chem_mov = get_chemical_movements()
+def section_title(text):
+    st.markdown(f'<div class="section-header">{text}</div>', unsafe_allow_html=True)
 
-    st.title("🌊 RO System Dashboard – Um Qasr")
-    st.caption("Connected to Neon PostgreSQL • Capacity 10 m³/day")
 
-    # --- KPI Row 1: Production & Quality ---
-    col1, col2, col3, col4 = st.columns(4)
+# ============================================================
+# 6) DP GAUGE (EMERALD GREEN)
+# ============================================================
 
-    today = datetime.now().date()
-    last_30 = today - timedelta(days=30)
+def render_dp_gauge(dp_value):
+    """Beautiful emerald-green DP gauge (0–10 bar)."""
 
-    if len(readings) > 0:
-        df30 = readings[readings["d"].dt.date >= last_30]
+    dp = max(0, min(dp_value, 10))
+
+    # Colors
+    if dp < 1:
+        needle_color = "#1ABC9C"     # emerald green
+    elif dp <= 4:
+        needle_color = "#F39C12"     # amber warning
     else:
-        df30 = pd.DataFrame(columns=readings.columns if len(readings)>0 else [])
+        needle_color = "#E74C3C"     # red danger
 
-    prod_today = 0.0
-    if len(readings) > 0:
-        today_rows = readings[readings["d"].dt.date == today]
-        if len(today_rows) > 0:
-            prod_today = float(today_rows["production"].sum())
+    fig, ax = plt.subplots(figsize=(2.6, 2.6))
+    ax.set_xlim(-1, 1)
+    ax.set_ylim(-1, 1)
+    ax.axis("off")
 
-    prod_30 = float(df30["production"].sum()) if len(df30) > 0 else 0.0
-    avg_tds = readings["tds"].mean() if "tds" in readings else 0
-    avg_ph = readings["ph"].mean() if "ph" in readings else 0
+    # Arc
+    ang = np.linspace(-0.75 * np.pi, 0.75 * np.pi, 300)
+    ax.plot(np.cos(ang), np.sin(ang), linewidth=3, color=DARK_GREEN)
 
-    with col1:
-        kpi_card("Today's Production", f"{prod_today:.1f} m³", f"Capacity {PLANT_CAPACITY} m³/day")
-    with col2:
-        kpi_card("30-day Production", f"{prod_30:.1f} m³")
-    with col3:
-        kpi_card("Avg TDS (all data)", f"{avg_tds:.0f} ppm")
-    with col4:
-        kpi_card("Avg pH (all data)", f"{avg_ph:.2f}")
+    # Needle
+    angle = -0.75 * np.pi + (dp / 10) * (1.5 * np.pi)
+    nx = 0.75 * np.cos(angle)
+    ny = 0.75 * np.sin(angle)
+    ax.plot([0, nx], [0, ny], linewidth=4, color=needle_color)
 
-    # --- Chemical cost per m3 over last 30d ---
-    chem_cost_per_m3_30 = 0.0
-    if len(chem_mov) > 0 and prod_30 > 0:
-        mov30 = chem_mov[chem_mov["d"].dt.date >= last_30]
-        out30 = mov30[mov30["movement_type"] == "OUT"]
-        if len(out30) > 0:
-            chems_df = get_chemicals()
-            cost_map = {row["name"]: float(row["unit_cost"]) for _, row in chems_df.iterrows()} if len(chems_df) > 0 else {}
-            usage = out30.groupby("name")["qty"].sum().reset_index()
-            total_cost_30 = 0.0
-            for _, r in usage.iterrows():
-                nm = r["name"]
-                qty = float(r["qty"])
-                unit_cost = cost_map.get(nm, 0.0)
-                total_cost_30 += qty * unit_cost
-            chem_cost_per_m3_30 = total_cost_30 / prod_30
+    ax.plot(0, 0, "o", markersize=10, color=EMERALD_GREEN)
+    ax.text(0, -0.25, f"{dp:.2f} bar", ha="center", fontsize=11, color=DARK_GREEN)
+    ax.text(0, -0.42, "DP", ha="center", fontsize=9, color=GREY)
 
-    st.markdown(" ")
-    col5, col6, col7, col8 = st.columns(4)
-    with col5:
-        kpi_card("Chem Cost / m³ (30d)", f"{chem_cost_per_m3_30:.4f}")
-    with col6:
-        kpi_card("Readings Count", f"{len(readings)}", "Total days with any reading")
-    with col7:
-        kpi_card("Chemicals Tracked", f"{len(chems)}")
-    with col8:
-        kpi_card("Movements Logged", f"{len(chem_mov)}")
-
-    st.markdown("---")
-
-    # --- Chemical Stock & Alerts ---
-    section_title("⚗️ Chemical Stock & Alerts")
-
-    if len(chems) == 0:
-        st.info("No chemicals found in database.")
-    else:
-        df_disp = chems.copy()
-        df_disp["stock_value"] = df_disp["qty"] * df_disp["unit_cost"]
-
-        edited_chem = st.data_editor(df_disp, num_rows="dynamic", key="chem_editor", use_container_width=True)
-        if st.button("💾 Save Chemical Table Changes"):
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("DELETE FROM chemicals;")
-            for _, r in edited_chem.iterrows():
-                cur.execute(
-                    "INSERT INTO chemicals (name, qty, unit_cost) VALUES (%s, %s, %s)",
-                    (r["name"], float(r.get("qty") or 0), float(r.get("unit_cost") or 0)),
-                )
-            conn.commit()
-            cur.close()
-            conn.close()
-            st.success("Chemical stock table updated.")
-            st.cache_data.clear()
-            chems = get_chemicals()
-            df_disp = chems.copy()
-            df_disp["stock_value"] = df_disp["qty"] * df_disp["unit_cost"]
-
-        for _, row in chems.iterrows():
-            nm = row["name"]
-            qty = float(row["qty"])
-            min_stock = MIN_STOCK.get(nm, 30)
-
-            st.markdown(f"**{nm}: {qty:.1f} kg (Min {min_stock} kg)**")
-            st.progress(min(qty / max(min_stock * 2, 1), 1.0))
-
-            # Chlorine special rule
-            if "Hypochlorite" in nm or "Chlorine" in nm:
-                if qty < 50:
-                    st.error(f"❗ URGENT: Chlorine stock {qty:.1f} kg < 50 kg")
-                elif qty < 80:
-                    st.warning(f"⚠ Chlorine stock {qty:.1f} kg – approaching low level.")
-                continue
-
-            if qty < min_stock:
-                st.error(f"❗ {nm} below minimum stock ({qty:.1f} kg < {min_stock} kg).")
-            elif qty < min_stock * 1.3:
-                st.warning(f"⚠ {nm} approaching minimum stock.")
-
-    st.markdown("---")
-
-    # --- Daily Chemical Usage Chart (last 30d, OUT only) ---
-    section_title("📊 Daily Chemical Usage – Last 30 Days (kg, OUT only)")
-    if len(chem_mov) == 0:
-        st.info("No chemical movements recorded yet.")
-    else:
-        mov30 = chem_mov[chem_mov["d"].dt.date >= last_30]
-        out30 = mov30[mov30["movement_type"] == "OUT"]
-        if len(out30) == 0:
-            st.info("No OUT movements in the last 30 days.")
-        else:
-            df_daily = out30.copy()
-            df_daily["qty"] = pd.to_numeric(df_daily["qty"], errors="coerce").fillna(0)
-            daily_usage = df_daily.groupby("d")["qty"].sum().reset_index()
-
-            fig, ax = plt.subplots(figsize=(8,3))
-            ax.bar(daily_usage["d"], daily_usage["qty"], color=PRIMARY_COLOR)
-            ax.set_ylabel("kg")
-            ax.set_xlabel("Date")
-            ax.set_title("Total Chemical Usage per Day (OUT)")
-            ax.grid(alpha=0.3)
-            plt.xticks(rotation=45)
-            st.pyplot(fig)
-
-
-
-# -----------------------------
-# CARTRIDGE FILTER PAGE
-# -----------------------------
-def page_cartridge():
-    st.title("🧱 Cartridge Filter – Differential Pressure & Status")
-
-    cart = get_cartridge()
-
-    # Quick status from latest record
-    last_dp = None
-    last_change_date = None
-    if len(cart) > 0:
-        last_row = cart.sort_values("d").iloc[-1]
-        last_dp = float(last_row.get("dp") or 0)
-        if int(last_row.get("is_change") or 0) == 1:
-            last_change_date = last_row["d"].date()
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if last_dp is not None:
-            kpi_card("Latest DP", f"{last_dp:.2f} bar")
-        else:
-            kpi_card("Latest DP", "N/A")
-    with col2:
-        if last_change_date:
-            kpi_card("Last Filter Change", f"{last_change_date:%Y-%m-%d}")
-        else:
-            kpi_card("Last Filter Change", "No change recorded")
-    with col3:
-        if last_dp is not None:
-            if last_dp >= 1.5:
-                kpi_card("Status", "CHANGE NOW", "DP ≥ 1.5 bar – replace cartridge")
-                st.error("Cartridge DP is high – change required.")
-            elif last_dp >= 1.0:
-                kpi_card("Status", "Monitor", "DP between 1.0 and 1.5 bar")
-                st.warning("Cartridge DP elevated – monitor closely.")
-            else:
-                kpi_card("Status", "OK", "DP below 1.0 bar")
-        else:
-            kpi_card("Status", "Unknown")
-
-    st.markdown("---")
-
-    # Add new reading form
-    st.subheader("Add New Cartridge DP Reading")
-    with st.form("add_cart_reading"):
-        c1, c2 = st.columns(2)
-        with c1:
-            d = st.date_input("Date", value=datetime.now().date())
-            dp = st.number_input("Differential Pressure (bar)", min_value=0.0, max_value=10.0, value=0.0, step=0.1)
-        with c2:
-            is_change = st.checkbox("Filter changed in this reading?")
-            change_cost = st.number_input("Change Cost", min_value=0.0, value=0.0, step=1.0)
-        remarks = st.text_input("Remarks", "")
-        submitted = st.form_submit_button("Save Reading")
-
-    if submitted:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO cartridge (d, dp, remarks, is_change, change_cost) VALUES (%s, %s, %s, %s, %s)",
-            (d, dp, remarks, 1 if is_change else 0, change_cost),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-        st.success("Cartridge reading saved.")
-        st.cache_data.clear()
-
-    st.markdown("---")
-
-    # Chart of DP over time
-    st.subheader("DP Trend")
-    cart = get_cartridge()
-    if len(cart) == 0:
-        st.info("No cartridge records yet.")
-    else:
-        fig, ax = plt.subplots(figsize=(8, 3))
-        ax.plot(cart["d"], cart["dp"], marker="o", markersize=3)
-        ax.set_xlabel("Date")
-        ax.set_ylabel("DP (bar)")
-        ax.set_title("Cartridge Differential Pressure Over Time")
-        ax.grid(alpha=0.3)
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
-
-        st.subheader("Edit Cartridge Records")
-        editable = cart.copy()
-        editable["d"] = editable["d"].dt.date
-        edited = st.data_editor(editable, num_rows="dynamic", key="cart_editor", use_container_width=True)
-        if st.button("💾 Save Cartridge Table Changes"):
-            conn = get_conn()
-            cur = conn.cursor()
-            # update by id; assume id exists
-            for _, row in edited.iterrows():
-                cur.execute(
-                    "UPDATE cartridge SET d=%s, dp=%s, remarks=%s, is_change=%s, change_cost=%s WHERE id=%s",
-                    (
-                        row["d"],
-                        float(row.get("dp") or 0),
-                        row.get("remarks") or "",
-                        int(row.get("is_change") or 0),
-                        float(row.get("change_cost") or 0),
-                        int(row["id"]),
-                    ),
-                )
-            conn.commit()
-            cur.close()
-            conn.close()
-            st.success("Cartridge table updated.")
-            st.cache_data.clear()
-# -----------------------------
-# MONTHLY REPORT PAGE
-# -----------------------------
-def page_monthly_report():
-    readings = get_readings()
-    st.title("📅 Monthly Water Quality Report")
-
-    if len(readings) == 0:
-        st.info("No readings found in database.")
-        return
-
-    readings = readings.sort_values("d")
-    readings["month"] = readings["d"].dt.to_period("M").astype(str)
-    months = sorted(readings["month"].unique())
-    month = st.selectbox("Select month", months, index=len(months)-1)
-
-    # compute month range
-    year, mon = map(int, month.split("-"))
-    month_start = datetime(year, mon, 1)
-    if mon == 12:
-        next_month = datetime(year+1, 1, 1)
-    else:
-        next_month = datetime(year, mon+1, 1)
-    month_end = next_month - timedelta(days=1)
-
-    # date range filter inside month
-    st.write("Filter readings within the selected month:")
-    start_date, end_date = st.date_input(
-        "Date range",
-        value=(month_start.date(), month_end.date()),
-        min_value=month_start.date(),
-        max_value=month_end.date(),
-    )
-
-    df_m = readings[readings["month"] == month].copy()
-    if len(df_m) == 0:
-        st.info("No readings for this month.")
-        return
-
-    # apply range filter
-    df_m = df_m[(df_m["d"].dt.date >= start_date) & (df_m["d"].dt.date <= end_date)]
-
-    if len(df_m) == 0:
-        st.info("No readings in this date range.")
-        return
-
-    col1, col2, col3, col4 = st.columns(4)
-    total_prod = float(df_m["production"].sum()) if "production" in df_m else 0.0
-    avg_tds = df_m["tds"].mean() if "tds" in df_m else 0.0
-    avg_ph = df_m["ph"].mean() if "ph" in df_m else 0.0
-    days_span = (end_date - start_date).days + 1
-
-    with col1:
-        kpi_card("Total Production", f"{total_prod:.1f} m³", f"{month_start:%b %Y}")
-    with col2:
-        kpi_card("Avg TDS", f"{avg_tds:.0f} ppm")
-    with col3:
-        kpi_card("Avg pH", f"{avg_ph:.2f}")
-    with col4:
-        kpi_card("Days in Range", f"{days_span}")
-
-    st.markdown("---")
-
-    # Trend chart with small markers
-    section_title("Quality Trend (TDS & pH)")
-    fig, ax1 = plt.subplots(figsize=(8,3))
-    ax1.plot(df_m["d"], df_m["tds"], marker="o", markersize=3, label="TDS (ppm)")
-    ax1.set_ylabel("TDS (ppm)")
-    ax1.grid(alpha=0.3)
-
-    ax2 = ax1.twinx()
-    ax2.plot(df_m["d"], df_m["ph"], marker="s", markersize=3, linestyle="--", label="pH", color="#3b82f6")
-    ax2.set_ylabel("pH")
-
-    fig.autofmt_xdate()
-    ax1.set_xlabel("Date")
-    ax1.set_title("TDS & pH vs Date (Small Markers)")
-
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1+lines2, labels1+labels2, loc="upper right")
     st.pyplot(fig)
 
-    # Daily details
-    section_title("Daily Details (Existing Readings)")
-    st.dataframe(
-        df_m[
-            ["d", "tds", "ph", "conductivity", "flow_m3", "production", "maintenance", "notes"]
-        ],
-        use_container_width=True,
-    )
 
-    # Maintenance summary
-    section_title("Maintenance & Notes Summary")
-    maint = df_m[
-        df_m["maintenance"].astype(str).str.strip() != ""
-    ][["d", "maintenance", "notes"]].copy()
-    if len(maint) == 0:
-        st.info("No maintenance records in this period.")
-    else:
-        st.dataframe(maint, use_container_width=True)
+# ============================================================
+# 7) DASHBOARD PAGE — EMERALD UI
+# ============================================================
 
-    # Monthly reading matrix (full month 1–31)
-    section_title("Monthly Reading Matrix (1–31) – TDS / pH / Conductivity (Full Month)")
-
-    all_days = pd.date_range(month_start, month_end, freq="D")
-    base = pd.DataFrame({{"d": all_days}})
-
-    full_month = readings[readings["month"] == month].copy()
-    if len(full_month) > 0:
-        daily_simple = full_month[["d", "tds", "ph", "conductivity"]].copy()
-    else:
-        daily_simple = pd.DataFrame(columns=["d", "tds", "ph", "conductivity"])
-
-    matrix = base.merge(daily_simple, on="d", how="left").sort_values("d")
-    matrix.rename(
-        columns={{"d": "Date", "tds": "TDS (ppm)", "ph": "pH", "conductivity": "Conductivity (µS/cm)"}},
-        inplace=True,
-    )
-    st.dataframe(matrix, use_container_width=True)
-
-    # Excel export with safe fallback if xlsxwriter missing
-    output = io.BytesIO()
-    excel_data = None
-    try:
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            matrix.to_excel(writer, index=False, sheet_name="Readings_1_31")
-        excel_data = output.getvalue()
-    except ImportError:
-        st.error("Excel export requires the 'xlsxwriter' package. Please add it to requirements.txt.")
-
-    if excel_data:
-        st.download_button(
-            label="⬇ Download Monthly Reading Excel (1–31)",
-            data=excel_data,
-            file_name=f"RO_Readings_{month}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-
-
-# -----------------------------
-# DAILY READINGS PAGE
-# -----------------------------
-def page_readings():
-    st.title("🧾 Daily RO Readings")
+def page_dashboard():
+    st.markdown("<h1 style='color:#0E6655;'>RO System Dashboard – Um Qasr</h1>", unsafe_allow_html=True)
+    st.caption("Emerald Corporate UI • ISO 14001 Environmental Theme")
 
     df = get_readings()
+    chem = get_chemicals()
+    cart = get_cartridge()
 
-    # Entry form
-    st.subheader("Add / Update Reading")
-    with st.form("add_reading_form"):
+    # ----------------------------------------------------------
+    # ❇ TOP ROW METRICS
+    # ----------------------------------------------------------
+
+    if len(df) == 0:
+        kpi_card("Unit Capacity", "10 m³/hr")
+        st.info("No readings recorded yet.")
+        return
+
+    last = df.iloc[-1]
+    last_tds = f"{last['tds']:.1f}"
+    last_ph = f"{last['ph']:.2f}"
+
+    df30 = df[df['d'] >= datetime.now() - pd.Timedelta(days=30)]
+    if len(df30) > 0:
+        cond_ok = (df30["tds"] <= 50) & (df30["ph"].between(6.5, 8.5))
+        compliance = (cond_ok.sum() / len(df30)) * 100
+        comp_val = f"{compliance:.1f}%"
+        good_days = cond_ok.sum()
+        bad_days = len(df30) - good_days
+        prod30 = df30["production"].sum()
+    else:
+        comp_val, good_days, bad_days, prod30 = "0%", 0, 0, 0
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: kpi_card("Unit Capacity", "10 m³/hr")
+    with col2: kpi_card("Last TDS", last_tds)
+    with col3: kpi_card("Last pH", last_ph)
+    with col4: kpi_card("Total Records", len(df))
+
+    col5, col6, col7, col8 = st.columns(4)
+    with col5: kpi_card("30-day Compliance", comp_val)
+    with col6: kpi_card("In-Spec Days", good_days)
+    with col7: kpi_card("Out-of-Spec", bad_days)
+    with col8: kpi_card("30-d Production", f"{prod30:.1f} m³")
+
+    # ----------------------------------------------------------
+    # ❇ WATER QUALITY CHART
+    # ----------------------------------------------------------
+
+    section_title("Water Quality Trend (Last 30 Days)")
+
+    if len(df30) > 0:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.plot(df30["d"], df30["tds"], label="TDS (ppm)", color="#1ABC9C", linewidth=2)
+        ax.plot(df30["d"], df30["ph"], label="pH", color="#0E6655", linewidth=2)
+        ax.plot(df30["d"], df30["conductivity"], label="Conductivity", color="#117A65", linewidth=2)
+
+        ax.legend()
+        plt.xticks(rotation=45)
+        ax.grid(alpha=0.3)
+        st.pyplot(fig)
+    else:
+        st.info("No data for last 30 days.")
+
+    # ----------------------------------------------------------
+    # ❇ PRODUCTION BAR CHART
+    # ----------------------------------------------------------
+
+    section_title("Daily Production – Last 30 Days")
+
+    if len(df30) > 0:
+        fig2, ax2 = plt.subplots(figsize=(6, 3))
+        ax2.bar(df30["d"], df30["production"], color=EMERALD_GREEN)
+        ax2.set_ylabel("m³")
+        plt.xticks(rotation=45)
+        ax2.grid(alpha=0.3)
+        st.pyplot(fig2)
+    else:
+        st.info("No production data.")
+
+    # ----------------------------------------------------------
+    # ❇ CARTRIDGE DP GAUGE
+    # ----------------------------------------------------------
+
+    section_title("Cartridge Filter DP Gauge")
+
+    if len(cart) == 0:
+        st.info("No cartridge records.")
+    else:
+        latest_dp = float(cart["dp"].iloc[-1])
+        st.write(f"Latest DP: **{latest_dp:.2f} bar**")
+
+        render_dp_gauge(latest_dp)
+
+        if latest_dp < 1:
+            st.success("DP Normal (< 1 bar)")
+        elif latest_dp <= 4:
+            st.warning("DP Warning (1–4 bar) • Monitor cartridge")
+        else:
+            st.error("DP High (> 4 bar) • Replacement required")
+
+    # ----------------------------------------------------------
+    # ❇ CHEMICAL STOCK
+    # ----------------------------------------------------------
+
+    section_title("Chemical Stock Levels")
+
+    if len(chem) == 0:
+        st.info("No chemicals found.")
+    else:
+        df_disp = chem.copy()
+        df_disp["stock_value"] = df_disp["qty"] * df_disp["unit_cost"]
+        st.dataframe(df_disp, use_container_width=True)
+
+        for _, row in chem.iterrows():
+            nm = row["name"]
+            qty = float(row["qty"])
+            st.write(f"**{nm}: {qty:.1f} kg**")
+
+            st.progress(min(qty / 200, 1.0))
+
+            if qty < 50:
+                st.error(f"{nm} below 50 kg — reorder needed.")
+            elif qty < 80:
+                st.warning(f"{nm} approaching low stock.")
+# ============================================================
+# 8) UTILITIES (COMPLIANCE + FIXED get_cartridge)
+# ============================================================
+
+def compute_compliance(df):
+    """
+    Compute water quality compliance based on TDS and pH.
+    TDS <= 50 ppm AND 6.5 <= pH <= 8.5 = in-spec.
+    Returns: (compliance%, good_days, bad_days)
+    """
+    if len(df) == 0:
+        return 0.0, 0, 0
+
+    cond_ok = (df["tds"] <= 50) & (df["ph"].between(6.5, 8.5))
+    total_days = len(df)
+    good_days = int(cond_ok.sum())
+    bad_days = total_days - good_days
+    compliance = (good_days / total_days) * 100 if total_days else 0
+    return round(compliance, 1), good_days, bad_days
+
+
+# ============================================================
+# 9) PAGE – ADD DAILY READING (EMERALD UI)
+# ============================================================
+
+def page_add_reading():
+    st.markdown("<h1 style='color:#0E6655;'>Daily RO Reading – Um Qasr</h1>", unsafe_allow_html=True)
+    st.caption("Record water quality, production, and maintenance for the RO unit.")
+
+    with st.form("daily_reading_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
-            d = st.date_input("Date", value=datetime.now().date())
-            tds = st.number_input("TDS (ppm)", min_value=0.0, step=1.0)
+            d = st.date_input("Date", value=date.today())
         with c2:
-            ph = st.number_input("pH", min_value=0.0, max_value=14.0, step=0.1)
-            cond = st.number_input("Conductivity (µS/cm)", min_value=0.0, step=1.0)
+            tds = st.number_input("TDS (ppm)", min_value=0.0, step=0.1)
         with c3:
-            flow = st.number_input("Flow (m³/h)", min_value=0.0, step=0.1)
-            prod = st.number_input("Daily Production (m³)", min_value=0.0, step=0.1)
-        maint = st.text_input("Maintenance", "")
-        notes = st.text_area("Notes", "")
+            ph = st.number_input("pH", min_value=0.0, max_value=14.0, step=0.01)
 
-        submitted = st.form_submit_button("💾 Save Reading")
-    if submitted:
-        conn = get_conn()
-        cur = conn.cursor()
-        # If a reading already exists for that date, update it, else insert
-        cur.execute("SELECT id FROM readings WHERE d=%s", (d,))
-        row = cur.fetchone()
-        if row:
-            cur.execute(
-                """
-                UPDATE readings
-                SET tds=%s, ph=%s, conductivity=%s, flow_m3=%s, production=%s,
-                    maintenance=%s, notes=%s
-                WHERE id=%s
-                """,
-                (tds, ph, cond, flow, prod, maint, notes, row[0]),
-            )
-        else:
-            cur.execute(
-                """
-                INSERT INTO readings
-                    (d, tds, ph, conductivity, flow_m3, production, maintenance, notes)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                """,
-                (d, tds, ph, cond, flow, prod, maint, notes),
-            )
-        conn.commit()
-        cur.close()
-        conn.close()
-        st.success("Reading saved.")
-        st.cache_data.clear()
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            conductivity = st.number_input("Conductivity (µS/cm)", min_value=0.0, step=1.0)
+        with c5:
+            flow_m3 = st.number_input("Flow (m³/hr)", min_value=0.0, step=0.1)
+        with c6:
+            production = st.number_input("Production Today (m³)", min_value=0.0, step=0.1)
+
+        st.markdown("<div class='sub-header'>Maintenance / Notes</div>", unsafe_allow_html=True)
+        maintenance = st.text_area("Maintenance done today", height=80)
+        notes = st.text_area("Notes / alarms / comments", height=80)
+
+        submitted = st.form_submit_button("💾 Save Daily Reading")
+        if submitted:
+            add_reading(str(d), tds, ph, conductivity, flow_m3, production, maintenance, notes)
+            st.success("✅ Daily RO reading saved successfully.")
 
     st.markdown("---")
+    section_title("Last 10 Readings")
 
-    st.subheader("Edit Readings Table")
     df = get_readings()
-    if len(df) == 0:
-        st.info("No readings found yet.")
+    if len(df) > 0:
+        st.dataframe(df.tail(10), use_container_width=True)
     else:
-        editable = df.copy()
-        editable["d"] = editable["d"].dt.date
-        edited = st.data_editor(
-            editable,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="readings_editor",
-        )
-        if st.button("💾 Save Table Changes", key="save_readings_table"):
-            conn = get_conn()
-            cur = conn.cursor()
-            for _, row in edited.iterrows():
-                cur.execute(
-                    """
-                    UPDATE readings
-                    SET d=%s, tds=%s, ph=%s, conductivity=%s, flow_m3=%s,
-                        production=%s, maintenance=%s, notes=%s
-                    WHERE id=%s
-                    """,
-                    (
-                        row["d"],
-                        float(row.get("tds") or 0),
-                        float(row.get("ph") or 0),
-                        float(row.get("conductivity") or 0),
-                        float(row.get("flow_m3") or 0),
-                        float(row.get("production") or 0),
-                        row.get("maintenance") or "",
-                        row.get("notes") or "",
-                        int(row["id"]),
-                    ),
-                )
-            conn.commit()
-            cur.close()
-            conn.close()
-            st.success("Readings table updated.")
-            st.cache_data.clear()
+        st.info("No readings recorded yet.")
 
 
-# -----------------------------
-# CHEMICAL MOVEMENTS PAGE
-# -----------------------------
-def page_chem_movements():
-    st.title("🧪 Chemical Movements (IN / OUT)")
+# ============================================================
+# 10) PAGE – CHEMICALS (STOCK, COST & MOVEMENTS)
+# ============================================================
+
+def page_chemicals():
+    st.markdown("<h1 style='color:#0E6655;'>Chemicals – Stock, Cost & Movements</h1>", unsafe_allow_html=True)
+    st.caption("Track chemical stock, update unit costs, and log IN / OUT movements.")
 
     chem_df = get_chemicals()
     mov_df = get_chemical_movements()
 
-    # Entry form
-    st.subheader("Record Chemical Movement")
-    with st.form("chem_movement_form"):
+    tab1, tab2, tab3 = st.tabs(["📦 Stock & Cost", "➕ Record IN / OUT", "📜 Movements History"])
+
+    # ---------- TAB 1: STOCK & COST ----------
+    with tab1:
+        section_title("Current Stock and Value")
+
+        if len(chem_df) == 0:
+            st.info("No chemicals found in database.")
+        else:
+            # Ensure numeric types for qty and unit_cost
+            chem_df = chem_df.copy()
+            chem_df["qty"] = pd.to_numeric(chem_df["qty"], errors="coerce").fillna(0)
+            chem_df["unit_cost"] = pd.to_numeric(chem_df["unit_cost"], errors="coerce").fillna(0)
+
+            disp = chem_df.copy()
+            disp["stock_value"] = disp["qty"] * disp["unit_cost"]
+
+            st.dataframe(disp, use_container_width=True)
+
+            st.markdown("<div class='sub-header'>Update Unit Cost (per kg)</div>", unsafe_allow_html=True)
+
+            c1, c2, c3 = st.columns([1, 1, 0.6])
+            with c1:
+                chem_name = st.selectbox(
+                    "Chemical",
+                    chem_df["name"].tolist(),
+                    key="chem_cost_name"
+                )
+            with c2:
+                current_cost = float(
+                    chem_df.loc[chem_df["name"] == chem_name, "unit_cost"].iloc[0]
+                )
+                new_cost = st.number_input(
+                    "Unit Cost (per kg)",
+                    min_value=0.0,
+                    step=0.1,
+                    value=current_cost,
+                    key="chem_unit_cost"
+                )
+            with c3:
+                if st.button("💾 Save Cost", key="save_cost_btn"):
+                    update_chemical_cost(chem_name, new_cost)
+                    st.success(f"✅ Unit cost updated for {chem_name}.")
+
+    # ---------- TAB 2: RECORD MOVEMENTS ----------
+    with tab2:
+        section_title("Record Chemical IN / OUT")
+
         c1, c2, c3 = st.columns(3)
         with c1:
-            d = st.date_input("Date", value=datetime.now().date(), key="chem_date")
-            if len(chem_df) > 0:
-                name = st.selectbox("Chemical", chem_df["name"].tolist())
-            else:
-                name = st.text_input("Chemical Name (no chemicals in DB)")
+            d = st.date_input("Date", value=date.today(), key="chem_date")
         with c2:
-            movement_type = st.selectbox("Movement Type", ["IN", "OUT"])
-            qty = st.number_input("Quantity (kg)", min_value=0.0, step=0.1)
+            if len(chem_df) > 0:
+                name = st.selectbox(
+                    "Chemical",
+                    chem_df["name"].tolist(),
+                    key="chem_name_select"
+                )
+            else:
+                name = st.text_input("Chemical Name", key="chem_name_manual")
         with c3:
-            remarks = st.text_input("Remarks", "")
+            movement_type = st.selectbox("Movement Type", ["IN", "OUT"], key="chem_move_type")
 
-        submitted = st.form_submit_button("💾 Save Movement")
-    if submitted:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO chemical_movements (d, name, movement_type, qty, remarks)
-            VALUES (%s,%s,%s,%s,%s)
-            """,
-            (d, name, movement_type, qty, remarks),
+        qty = st.number_input("Quantity (kg)", min_value=0.0, step=0.1, key="chem_qty")
+        remarks = st.text_input(
+            "Remarks / reference (invoice, batch, etc.)",
+            key="chem_remarks"
         )
-        # update stock
-        if movement_type == "IN":
-            cur.execute(
-                "UPDATE chemicals SET qty = qty + %s WHERE name=%s",
-                (qty, name),
-            )
+
+        if st.button("💾 Save Movement", key="chem_move_save"):
+            if not name:
+                st.error("Please select or enter a chemical name.")
+            elif qty <= 0:
+                st.error("Quantity must be greater than 0.")
+            else:
+                record_chemical_movement(str(d), name, movement_type, qty, remarks)
+                st.success(f"✅ {movement_type} movement recorded for {name}.")
+
+    # ---------- TAB 3: HISTORY ----------
+    with tab3:
+        section_title("All Chemical Movements")
+
+        if len(mov_df) == 0:
+            st.info("No chemical movements recorded yet.")
         else:
-            cur.execute(
-                "UPDATE chemicals SET qty = qty - %s WHERE name=%s",
-                (qty, name),
-            )
-        conn.commit()
-        cur.close()
-        conn.close()
-        st.success("Chemical movement recorded and stock updated.")
-        st.cache_data.clear()
+            st.dataframe(mov_df, use_container_width=True)
+
+
+# ============================================================
+# 11) PAGE – CARTRIDGE FILTER (DP MONITORING)
+# ============================================================
+
+def page_cartridge():
+    st.markdown("<h1 style='color:#0E6655;'>Cartridge Filter – DP Monitoring</h1>", unsafe_allow_html=True)
+    st.caption("Monitor differential pressure (DP) and log cartridge actions.")
+
+    st.markdown("<div class='sub-header'>Enter Pressure Readings</div>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        before = st.number_input(
+            "Pressure BEFORE Filter (bar)",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.0,
+            step=0.1
+        )
+    with col2:
+        after = st.number_input(
+            "Pressure AFTER Filter (bar)",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.0,
+            step=0.1
+        )
+
+    if after > before:
+        st.warning("After-pressure cannot be higher than before. Adjusting AFTER to BEFORE.")
+        after = before
+
+    dp = before - after
+    if dp < 0:
+        dp = 0.0
+
+    kpi_card("Differential Pressure (DP)", f"{dp:.2f} bar")
+
+    st.markdown("<div class='sub-header'>DP Gauge (0–10 bar)</div>", unsafe_allow_html=True)
+    render_dp_gauge(dp)
+
+    if dp < 1:
+        st.success("DP Normal – Cartridge OK (DP < 1 bar).")
+    elif dp <= 4:
+        st.warning("DP Warning (1–4 bar) – Monitor filter.")
+    else:
+        st.error("High DP > 4 bar – Replace cartridge immediately.")
 
     st.markdown("---")
+    section_title("Save Cartridge Record")
 
-    st.subheader("Edit Movements Table")
-    mov_df = get_chemical_movements()
-    if len(mov_df) == 0:
-        st.info("No movements found yet.")
-    else:
-        editable = mov_df.copy()
-        editable["d"] = editable["d"].dt.date
-        edited = st.data_editor(
-            editable,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="movements_editor",
+    c1, c2 = st.columns(2)
+    with c1:
+        d = st.date_input("Date", value=date.today(), key="cart_date")
+    with c2:
+        is_change = st.checkbox("Cartridge replaced during this visit?", key="cart_is_change")
+
+    remarks = st.text_input(
+        "Remarks (change / inspection / cleaning)",
+        key="cart_remarks"
+    )
+
+    change_cost = 0.0
+    if is_change:
+        change_cost = st.number_input(
+            "Replacement Cost",
+            min_value=0.0,
+            step=1.0,
+            value=0.0,
+            key="cart_cost"
         )
-        if st.button("💾 Save Movements Table Changes", key="save_movements_table"):
-            conn = get_conn()
-            cur = conn.cursor()
-            for _, row in edited.iterrows():
-                cur.execute(
-                    """
-                    UPDATE chemical_movements
-                    SET d=%s, name=%s, movement_type=%s, qty=%s, remarks=%s
-                    WHERE id=%s
-                    """,
-                    (
-                        row["d"],
-                        row["name"],
-                        row["movement_type"],
-                        float(row.get("qty") or 0),
-                        row.get("remarks") or "",
-                        int(row["id"]),
-                    ),
-                )
-            conn.commit()
-            cur.close()
-            conn.close()
-            st.success("Chemical movements updated.")
-            st.cache_data.clear()
-# -----------------------------
-# MAIN
-# -----------------------------
-def main():
-    init_db()
 
-    st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Dashboard", "Monthly Report", "Cartridge Filter", "Readings", "Chemical Movements"])
+    if st.button("💾 Save Cartridge Log", key="cart_save_btn"):
+        add_cartridge(str(d), dp, remarks, int(is_change), change_cost)
+        st.success("✅ Cartridge filter record saved successfully.")
 
-    if page == "Dashboard":
-        page_dashboard()
-    elif page == "Monthly Report":
-        page_monthly_report()
-    elif page == "Cartridge Filter":
-        page_cartridge()
-    elif page == "Readings":
-        page_readings()
+    st.markdown("---")
+    section_title("Cartridge Filter History")
+
+    hist = get_cartridge()
+    if len(hist) == 0:
+        st.info("No cartridge history available.")
     else:
-        page_chem_movements()
+        st.dataframe(hist, use_container_width=True)
+# ============================================================
+# 12) PDF REPORT HELPERS (MONTHLY & MAINTENANCE)
+# ============================================================
+
+def create_pdf(month, df_month, df_chem_out, df_cart):
+    filename = f"RO_Report_{month}.pdf"
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+
+    pdf.cell(0, 10, f"Monthly RO Report - Um Qasr Port - {month}", ln=True)
+    pdf.ln(4)
+
+    # ---------------- Water KPIs ----------------
+    pdf.set_font("Arial", "", 11)
+    avg_tds = df_month["tds"].mean() if len(df_month) > 0 else 0.0
+    avg_ph = df_month["ph"].mean() if len(df_month) > 0 else 0.0
+    out_days = ((df_month["tds"] > 50) | (~df_month["ph"].between(6.5, 8.5))).sum() if len(df_month) > 0 else 0
+    total_prod = df_month["production"].sum() if len(df_month) > 0 else 0.0
+
+    pdf.multi_cell(
+        0,
+        7,
+        (
+            f"Average TDS: {avg_tds:.2f}\n"
+            f"Average pH: {avg_ph:.2f}\n"
+            f"Out-of-spec Days: {int(out_days)}\n"
+            f"Total Production (m3): {total_prod:.1f}\n"
+        ),
+    )
+
+    # ---------------- Chemical Cost Summary ----------------
+    pdf.ln(3)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "Chemical Usage and Costs (kg):", ln=True)
+    pdf.set_font("Arial", "", 11)
+
+    chem_df = get_chemicals()
+    cost_map = {row["name"]: float(row["unit_cost"]) for _, row in chem_df.iterrows()} if len(chem_df) > 0 else {}
+
+    total_chem_cost = 0.0
+
+    if len(df_chem_out) > 0:
+        usage = df_chem_out.groupby("name")["qty"].sum().reset_index()
+
+        for _, r in usage.iterrows():
+            ch = r["name"]
+            qty = float(r["qty"])
+            unit_cost = cost_map.get(ch, 0.0)
+            chem_cost = qty * unit_cost
+            total_chem_cost += chem_cost
+            rate_kg_m3 = qty / total_prod if total_prod > 0 else 0.0
+            rate_cost_m3 = chem_cost / total_prod if total_prod > 0 else 0.0
+
+            pdf.multi_cell(
+                0,
+                6,
+                f"{ch}: qty={qty:.2f} kg, cost={chem_cost:.2f}, rate={rate_kg_m3:.4f} kg/m3, cost_rate={rate_cost_m3:.4f}/m3",
+            )
+    else:
+        pdf.cell(0, 6, "No chemical consumption recorded this month.", ln=True)
+
+    # ---------------- Cartridge Filter Cost ----------------
+    pdf.ln(4)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "Cartridge Filter Activity:", ln=True)
+    pdf.set_font("Arial", "", 11)
+
+    total_cart_cost = 0.0
+    num_changes = 0
+
+    if len(df_cart) > 0:
+        df_cart = df_cart.copy()
+        if "is_change" not in df_cart.columns:
+            df_cart["is_change"] = 0
+        if "change_cost" not in df_cart.columns:
+            df_cart["change_cost"] = 0.0
+
+        num_changes = int(df_cart["is_change"].fillna(0).sum())
+        total_cart_cost = float(df_cart["change_cost"].fillna(0.0).sum())
+
+        for _, r in df_cart.iterrows():
+            d_str = r["d"].date().isoformat()
+            dp = float(r["dp"])
+            remarks = str(r["remarks"] or "")
+            is_change = int(r["is_change"])
+            c_cost = float(r["change_cost"])
+            tag = "CHANGE" if is_change else "CHECK"
+
+            pdf.cell(
+                0,
+                6,
+                f"{d_str}: DP={dp:.2f} bar - {tag} - cost={c_cost:.2f} - {remarks}",
+                ln=True,
+            )
+    else:
+        pdf.cell(0, 6, "No cartridge activity recorded this month.", ln=True)
+
+    # ---------------- Total Cost / m3 ----------------
+    pdf.ln(4)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "Total Consumable Cost:", ln=True)
+    pdf.set_font("Arial", "", 11)
+
+    total_cost = total_chem_cost + total_cart_cost
+    cost_rate = total_cost / total_prod if total_prod > 0 else 0.0
+
+    pdf.multi_cell(
+        0,
+        6,
+        (
+            f"Total chemical cost: {total_chem_cost:.2f}\n"
+            f"Total cartridge cost: {total_cart_cost:.2f}\n"
+            f"Overall consumable cost: {total_cost:.2f}\n"
+            f"Cost per m3: {cost_rate:.4f}/m3\n"
+        ),
+    )
+
+    pdf.output(filename)
+    return filename
+
+
+def create_maintenance_pdf(month, df_maint, df_cart):
+    filename = f"RO_Maintenance_{month}.pdf"
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+
+    pdf.cell(0, 10, f"Maintenance Report - Um Qasr RO - {month}", ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "", 11)
+    pdf.multi_cell(
+        0,
+        7,
+        (
+            "This report contains maintenance actions, cartridge changes, DP checks, "
+            "notes, and consumable costs for the selected month.\n"
+        ),
+    )
+
+    # ---- Daily Maintenance ----
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "1) Daily Maintenance Logs", ln=True)
+    pdf.set_font("Arial", "", 11)
+
+    if len(df_maint) > 0:
+        for _, r in df_maint.iterrows():
+            date_str = r["d"].date().isoformat()
+            mtxt = (r["maintenance"] or "").strip()
+            notes = (r["notes"] or "").strip()
+            pdf.multi_cell(0, 6, f"- {date_str}: {mtxt} (Notes: {notes})")
+    else:
+        pdf.cell(0, 6, "No maintenance logs for this month.", ln=True)
+
+    # ---- Cartridge Section ----
+    pdf.ln(4)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "2) Cartridge Filter Actions", ln=True)
+    pdf.set_font("Arial", "", 11)
+
+    if len(df_cart) > 0:
+        for _, r in df_cart.iterrows():
+            d_str = r["d"].date().isoformat()
+            dp = float(r["dp"])
+            remarks = r["remarks"]
+            is_change = int(r["is_change"])
+            cost = float(r["change_cost"])
+            tag = "CHANGE" if is_change else "CHECK"
+            pdf.cell(
+                0,
+                6,
+                f"- {d_str}: DP={dp:.2f} bar - {tag} - cost={cost:.2f} - {remarks}",
+                ln=True,
+            )
+    else:
+        pdf.cell(0, 6, "No cartridge entries for this month.", ln=True)
+
+    pdf.output(filename)
+    return filename
+
+
+# ============================================================
+# 13) PAGE – MONTHLY REPORT (WATER, CHEMICALS & COST)
+# ============================================================
+
+def page_monthly_report():
+    st.markdown("<h1 style='color:#0E6655;'>Monthly Report – Water, Chemicals & Cost</h1>", unsafe_allow_html=True)
+    st.caption("Analyze monthly performance, chemical costs, and cartridge activity.")
+
+    df = get_readings()
+    if len(df) == 0:
+        st.info("No readings data yet.")
+        return
+
+    df["month"] = df["d"].dt.strftime("%Y-%m")
+    months = sorted(df["month"].unique())
+    month = st.selectbox("Select Month (YYYY-MM)", months)
+
+    df_m = df[df["month"] == month]
+    total_prod = df_m["production"].sum() if len(df_m) > 0 else 0.0
+
+    # Chemical OUT (consumption) for that month
+    chem_mov = get_chemical_movements()
+    if len(chem_mov) > 0:
+        chem_mov["month"] = chem_mov["d"].dt.strftime("%Y-%m")
+        df_chem_out = chem_mov[
+            (chem_mov["month"] == month) &
+            (chem_mov["movement_type"] == "OUT")
+        ]
+    else:
+        df_chem_out = pd.DataFrame(columns=["d", "name", "movement_type", "qty", "remarks"])
+
+    # Cartridge records that month
+    cart_df = get_cartridge()
+    if len(cart_df) > 0:
+        cart_df["month"] = cart_df["d"].dt.strftime("%Y-%m")
+        df_cart_m = cart_df[cart_df["month"] == month]
+    else:
+        df_cart_m = pd.DataFrame(columns=["d", "dp", "remarks", "is_change", "change_cost"])
+
+    # ---- Water trend ----
+    section_title("Water Quality Trend (TDS / pH / Conductivity)")
+    if len(df_m) > 0:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.plot(df_m["d"], df_m["tds"], label="TDS", color=EMERALD_GREEN)
+        ax.plot(df_m["d"], df_m["ph"], label="pH", color=DARK_GREEN)
+        ax.plot(df_m["d"], df_m["conductivity"], label="Conductivity", color="#117A65")
+        ax.legend()
+        ax.grid(alpha=0.3)
+        plt.xticks(rotation=45)
+        st.pyplot(fig)
+    else:
+        st.info("No daily data for this month.")
+
+    # ---- Detail table ----
+    section_title("Daily Details")
+    st.dataframe(
+        df_m[
+            [
+                "d",
+                "tds",
+                "ph",
+                "conductivity",
+                "flow_m3",
+                "production",
+                "maintenance",
+                "notes",
+            ]
+        ],
+        use_container_width=True
+    )
+
+    # ---- Chemical consumption summary ----
+    section_title("Chemical Consumption (OUT) – This Month")
+    if len(df_chem_out) > 0:
+        st.dataframe(df_chem_out, use_container_width=True)
+
+        chem_df = get_chemicals()
+        cost_map = {row["name"]: float(row["unit_cost"]) for _, row in chem_df.iterrows()} if len(chem_df) > 0 else {}
+
+        usage = df_chem_out.groupby("name")["qty"].sum().reset_index()
+        rows = []
+        total_chem_cost = 0.0
+
+        for _, r in usage.iterrows():
+            ch = r["name"]
+            qty = float(r["qty"])
+            unit_cost = cost_map.get(ch, 0.0)
+            chem_cost = qty * unit_cost
+            total_chem_cost += chem_cost
+            rate_kg_m3 = qty / total_prod if total_prod > 0 else 0.0
+            rate_cost_m3 = chem_cost / total_prod if total_prod > 0 else 0.0
+            rows.append(
+                {
+                    "Chemical": ch,
+                    "Qty (kg)": qty,
+                    "Unit cost": unit_cost,
+                    "Total cost": chem_cost,
+                    "Rate (kg/m3)": rate_kg_m3,
+                    "Cost rate (/m3)": rate_cost_m3,
+                }
+            )
+
+        summary_df = pd.DataFrame(rows)
+        st.markdown("**Chemical usage and cost summary:**")
+        st.dataframe(summary_df, use_container_width=True)
+    else:
+        st.info("No chemical OUT movements recorded this month.")
+        total_chem_cost = 0.0
+
+    # ---- Cartridge activity & cost ----
+    section_title("Cartridge Filter Activity – This Month")
+    if len(df_cart_m) > 0:
+        st.dataframe(df_cart_m, use_container_width=True)
+
+        if "is_change" not in df_cart_m.columns:
+            df_cart_m["is_change"] = 0
+        if "change_cost" not in df_cart_m.columns:
+            df_cart_m["change_cost"] = 0.0
+
+        num_changes = int(df_cart_m["is_change"].fillna(0).sum())
+        total_cart_cost = float(df_cart_m["change_cost"].fillna(0.0).sum())
+    else:
+        st.info("No cartridge activity this month.")
+        num_changes = 0
+        total_cart_cost = 0.0
+
+    # ---- Global consumables cost ----
+    section_title("Monthly Consumables Cost Summary")
+    total_consumable_cost = total_chem_cost + total_cart_cost
+    cost_per_m3 = total_consumable_cost / total_prod if total_prod > 0 else 0.0
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        kpi_card("Total Chemical Cost", f"{total_chem_cost:.2f}")
+    with col2:
+        kpi_card("Cartridge Changes", f"{num_changes}")
+    with col3:
+        kpi_card("Cartridge Cost", f"{total_cart_cost:.2f}")
+    with col4:
+        kpi_card("Total Cost per m³", f"{cost_per_m3:.4f}")
+
+    # ---- PDF Export ----
+    st.markdown("---")
+    if st.button("📄 Export Monthly Water/Chem PDF"):
+        file = create_pdf(month, df_m, df_chem_out, df_cart_m)
+        with open(file, "rb") as f:
+            st.download_button("⬇ Download Monthly PDF", f, file_name=file, mime="application/pdf")
+        st.success("Monthly PDF report generated.")
+
+
+# ============================================================
+# 14) PAGE – MAINTENANCE REPORT
+# ============================================================
+
+def page_maintenance_report():
+    st.markdown("<h1 style='color:#0E6655;'>Maintenance Report – Daily Actions & Cartridge</h1>", unsafe_allow_html=True)
+    st.caption("Generate a monthly maintenance and cartridge activity report.")
+
+    df = get_readings()
+    if len(df) == 0:
+        st.info("No readings data yet.")
+        return
+
+    df["month"] = df["d"].dt.strftime("%Y-%m")
+    months = sorted(df["month"].unique())
+    month = st.selectbox("Select Month (YYYY-MM)", months)
+
+    df_m = df[df["month"] == month]
+
+    # Daily maintenance rows with text
+    if len(df_m) > 0:
+        df_maint = df_m.copy()
+        df_maint["maintenance"] = df_maint["maintenance"].fillna("")
+        df_maint["notes"] = df_maint["notes"].fillna("")
+        df_maint = df_maint[df_maint["maintenance"].str.strip() != ""]
+    else:
+        df_maint = pd.DataFrame(columns=df.columns)
+
+    # Cartridge records for that month
+    cart_df = get_cartridge()
+    if len(cart_df) > 0:
+        cart_df["month"] = cart_df["d"].dt.strftime("%Y-%m")
+        df_cart_m = cart_df[cart_df["month"] == month]
+    else:
+        df_cart_m = pd.DataFrame(columns=["d", "dp", "remarks", "is_change", "change_cost"])
+
+    section_title("Daily Maintenance Notes")
+    if len(df_maint) > 0:
+        st.dataframe(df_maint[["d", "maintenance", "notes"]], use_container_width=True)
+    else:
+        st.info("No maintenance notes recorded for this month.")
+
+    section_title("Cartridge Filter DP & Actions")
+    if len(df_cart_m) > 0:
+        st.dataframe(df_cart_m, use_container_width=True)
+    else:
+        st.info("No cartridge entries for this month.")
+
+    st.markdown("---")
+    if st.button("📄 Export Maintenance PDF"):
+        file = create_maintenance_pdf(month, df_maint, df_cart_m)
+        with open(file, "rb") as f:
+            st.download_button("⬇ Download Maintenance PDF", f, file_name=file, mime="application/pdf")
+        st.success("Maintenance PDF generated.")
+
+
+# ============================================================
+# 15) MAIN ROUTER
+# ============================================================
+
+def main():
+    # Sidebar branding
+    st.sidebar.markdown(
+        f"""
+        <h2 style="color:{DARK_GREEN};">Nile Projects Service</h2>
+        <p style="color:{GREY}; font-size:13px;">
+            RO System – Um Qasr Port<br>
+            10 m³/hr Unit • Emerald ISO 14001 Theme
+        </p>
+        <hr>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    menu = st.sidebar.radio(
+        "Menu",
+        [
+            "Dashboard",
+            "Add Daily Reading",
+            "Chemicals",
+            "Cartridge Filter",
+            "Monthly Report",
+            "Maintenance Report",
+        ],
+    )
+
+    if menu == "Dashboard":
+        page_dashboard()
+    elif menu == "Add Daily Reading":
+        page_add_reading()
+    elif menu == "Chemicals":
+        page_chemicals()
+    elif menu == "Cartridge Filter":
+        page_cartridge()
+    elif menu == "Monthly Report":
+        page_monthly_report()
+    elif menu == "Maintenance Report":
+        page_maintenance_report()
+
 
 if __name__ == "__main__":
     main()
