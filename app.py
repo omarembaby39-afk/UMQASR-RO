@@ -564,8 +564,14 @@ def page_dashboard():
 # ============================================================
 
 def page_add_reading():
-    st.markdown("<h1 style='color:#0E6655;'>Daily RO Reading – Um Qasr</h1>", unsafe_allow_html=True)
-    st.caption("Record water quality, production, and maintenance for the RO unit.")
+    st.markdown(
+        "<h1 style='color:#0E6655;'>Daily RO Reading – Um Qasr</h1>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Enter cumulative flowmeter reading; system will calculate daily production automatically.")
+
+    # Load all previous readings once
+    df_all = get_readings()
 
     with st.form("daily_reading_form"):
         c1, c2, c3 = st.columns(3)
@@ -579,27 +585,87 @@ def page_add_reading():
 
         c4, c5, c6 = st.columns(3)
         with c4:
-            conductivity = st.number_input("Conductivity (µS/cm)", min_value=0.0, step=1.0)
+            conductivity = st.number_input(
+                "Conductivity (µS/cm)", min_value=0.0, step=1.0
+            )
         with c5:
-            flow_m3 = st.number_input("Flow (m³/hr)", min_value=0.0, step=0.1)
+            # This is the CUMULATIVE flowmeter reading
+            flow_total = st.number_input(
+                "Flowmeter Total Reading Today (m³)",
+                min_value=0.0,
+                step=0.1,
+                help="Reading from main water flowmeter – cumulative (ever-increasing).",
+            )
         with c6:
-            production = st.number_input("Production Today (m³)", min_value=0.0, step=0.1)
+            st.markdown(
+                "<small>Daily production will be calculated as "
+                "today reading minus yesterday reading.</small>",
+                unsafe_allow_html=True,
+            )
 
-        st.markdown("<div class='sub-header'>Maintenance / Notes</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='sub-header'>Maintenance / Notes</div>",
+            unsafe_allow_html=True,
+        )
         maintenance = st.text_area("Maintenance done today", height=80)
         notes = st.text_area("Notes / alarms / comments", height=80)
 
         submitted = st.form_submit_button("💾 Save Daily Reading")
-        if submitted:
-            add_reading(str(d), tds, ph, conductivity, flow_m3, production, maintenance, notes)
-            st.success("✅ Daily RO reading saved successfully.")
+
+    if submitted:
+        # Find yesterday / last reading before selected date
+        prev_flow = None
+        if len(df_all) > 0:
+            df_prev = df_all[df_all["d"] < pd.to_datetime(d)]
+            if len(df_prev) > 0:
+                prev_flow = float(df_prev["flow_m3"].iloc[-1])
+
+        # Calculate daily production = today - yesterday
+        if prev_flow is None:
+            # first reading – no previous value
+            daily_prod = 0.0
+        else:
+            daily_prod = max(flow_total - prev_flow, 0.0)
+
+        # Save: store flowmeter reading in flow_m3, and daily diff in production
+        add_reading(
+            str(d),
+            tds,
+            ph,
+            conductivity,
+            flow_total,   # cumulative meter reading
+            daily_prod,   # daily production (today - yesterday)
+            maintenance,
+            notes,
+        )
+
+        if prev_flow is None:
+            msg = (
+                f"First reading stored. Flowmeter total = {flow_total:.1f} m³. "
+                "Daily production set to 0.0 m³ (no previous day)."
+            )
+        else:
+            msg = (
+                f"Yesterday meter = {prev_flow:.1f} m³, today = {flow_total:.1f} m³ → "
+                f"Daily production = {daily_prod:.1f} m³."
+            )
+
+        st.success("✅ Daily RO reading saved successfully.")
+        st.info(msg)
 
     st.markdown("---")
     section_title("Last 10 Readings")
 
     df = get_readings()
     if len(df) > 0:
-        st.dataframe(df.tail(10), use_container_width=True)
+        # Show both meter reading and calculated daily production
+        show = df[["d", "tds", "ph", "conductivity", "flow_m3", "production", "maintenance", "notes"]]
+        show = show.rename(columns={
+            "d": "Date",
+            "flow_m3": "Flowmeter Total (m³)",
+            "production": "Daily Production (m³)",
+        })
+        st.dataframe(show.tail(10), use_container_width=True)
     else:
         st.info("No readings recorded yet.")
 
