@@ -220,7 +220,9 @@ def get_cartridge():
     df = pd.read_sql("SELECT * FROM cartridge ORDER ORDER BY d", conn)
     conn.close()
     if len(df) > 0:
-        df["d"] = pd.to_datetime(df["d"])
+     df["d"] = pd.to_datetime(df["d"], errors="coerce")
+df = df[df["d"].notna()]
+
     return df
 
 
@@ -266,7 +268,8 @@ def get_chemical_movements():
     df = pd.read_sql("SELECT * FROM chemical_movements ORDER BY d", conn)
     conn.close()
     if len(df) > 0:
-        df["d"] = pd.to_datetime(df["d"])
+   df["d"] = pd.to_datetime(df["d"], errors="coerce")
+df = df[df["d"].notna()]
     return df
 
 
@@ -489,7 +492,8 @@ def get_cartridge():
     df = pd.read_sql("SELECT * FROM cartridge ORDER BY d", conn)
     conn.close()
     if len(df) > 0:
-        df["d"] = pd.to_datetime(df["d"])
+       df["d"] = pd.to_datetime(df["d"], errors="coerce")
+df = df[df["d"].notna()]
     return df
 
 
