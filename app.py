@@ -20,6 +20,14 @@ import os
 
 EMERALD_GREEN = "#1ABC9C"
 DARK_GREEN = "#0E6655"
+
+# Minimum stock thresholds (kg) for each chemical
+MIN_STOCK = {
+    "Sodium Hypochlorite (Chlorine)": 50,
+    "Hydrochloric Acid (HCL)": 30,
+    "Antiscalant PC-391": 25,
+}
+
 LIGHT_BG = "#ECF8F6"
 WHITE = "#FFFFFF"
 GREY = "#666666"
@@ -138,6 +146,24 @@ def init_postgres():
         );
     """)
 
+    # ---- chemicals ----
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chemicals (
+            name TEXT PRIMARY KEY,
+            qty DOUBLE PRECISION,
+            unit_cost DOUBLE PRECISION DEFAULT 0
+        );
+    """)
+
+    # Insert base chemicals if missing (Um Qasr RO)
+    cur.execute("""
+        INSERT INTO chemicals (name, qty, unit_cost)
+        VALUES
+            ('Sodium Hypochlorite (Chlorine)', 0, 0),
+            ('Hydrochloric Acid (HCL)', 0, 0),
+            ('Antiscalant PC-391', 0, 0)
+        ON CONFLICT (name) DO NOTHING;
+    """)
     # ---- chemicals ----
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chemicals (
@@ -383,10 +409,14 @@ def page_dashboard():
     with col4: kpi_card("Total Records", len(df))
 
     col5, col6, col7, col8 = st.columns(4)
-    with col5: kpi_card("30-day Compliance", comp_val)
-    with col6: kpi_card("In-Spec Days", good_days)
-    with col7: kpi_card("Out-of-Spec", bad_days)
-    with col8: kpi_card("30-d Production", f"{prod30:.1f} m³")
+    with col5:
+        kpi_card("30-day Compliance", comp_val)
+    with col6:
+        kpi_card("In-Spec Days", good_days)
+    with col7:
+        kpi_card("Out-of-Spec", bad_days)
+    with col8:
+        kpi_card("30-d Production", f"{prod30:.1f} m³")
 
     # ----------------------------------------------------------
     # ❇ WATER QUALITY CHART
@@ -448,6 +478,10 @@ def page_dashboard():
     # ❇ CHEMICAL STOCK
     # ----------------------------------------------------------
 
+        # ----------------------------------------------------------
+    # ❇ CHEMICAL STOCK
+    # ----------------------------------------------------------
+
     section_title("Chemical Stock Levels")
 
     if len(chem) == 0:
@@ -460,17 +494,25 @@ def page_dashboard():
         for _, row in chem.iterrows():
             nm = row["name"]
             qty = float(row["qty"])
-            st.write(f"**{nm}: {qty:.1f} kg**")
+            min_stock = MIN_STOCK.get(nm, 30)  # default 30 kg if not defined
 
-            st.progress(min(qty / 200, 1.0))
+            st.write(f"**{nm}: {qty:.1f} kg (Min stock {min_stock} kg)**")
+            st.progress(min(qty / max(min_stock * 2, 1), 1.0))
 
-            if qty < 50:
-                st.error(f"{nm} below 50 kg — reorder needed.")
-            elif qty < 80:
-                st.warning(f"{nm} approaching low stock.")
-# ============================================================
-# 8) UTILITIES (COMPLIANCE + FIXED get_cartridge)
-# ============================================================
+            # Specific rule for chlorine
+            if "Hypochlorite" in nm or "Chlorine" in nm:
+                if qty < 50:
+                    st.error(f"⚠ Chlorine stock {qty:.1f} kg < 50 kg – URGENT reorder.")
+                elif qty < 80:
+                    st.warning(f"Chlorine stock {qty:.1f} kg – approaching low level.")
+                continue
+
+            # Generic rules for other chemicals
+            if qty < min_stock:
+                st.error(f"{nm} below minimum stock ({qty:.1f} kg < {min_stock} kg).")
+            elif qty < min_stock * 1.3:
+                st.warning(f"{nm} approaching minimum stock.")
+===================
 
 def compute_compliance(df):
     """
