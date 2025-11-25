@@ -512,7 +512,7 @@ def page_dashboard():
                 st.error(f"{nm} below minimum stock ({qty:.1f} kg < {min_stock} kg).")
             elif qty < min_stock * 1.3:
                 st.warning(f"{nm} approaching minimum stock.")
-===================
+# ===================
 
 def compute_compliance(df):
     """
