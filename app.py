@@ -190,12 +190,15 @@ def add_reading(d, tds, ph, cond, flow, prod, maint, notes):
 
 
 def get_readings():
-    conn = get_conn()
-    if not conn: return pd.DataFrame()
-    df = pd.read_sql("SELECT * FROM readings ORDER BY d", conn)
-    conn.close()
+    """Return all daily readings as a DataFrame (sorted by date)."""
+    c = conn()
+    df = pd.read_sql("SELECT * FROM readings ORDER BY d", c)
+    c.close()
     if len(df) > 0:
-        df["d"] = pd.to_datetime(df["d"])
+        # convert invalid dates to NaT instead of raising error
+        df["d"] = pd.to_datetime(df["d"], errors="coerce")
+        # drop any rows where date could not be parsed
+        df = df[df["d"].notna()]
     return df
 
 
