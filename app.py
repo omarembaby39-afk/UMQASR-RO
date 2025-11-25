@@ -191,14 +191,15 @@ def add_reading(d, tds, ph, cond, flow, prod, maint, notes):
 
 def get_readings():
     """Return all daily readings as a DataFrame (sorted by date)."""
-    c = conn()
-    df = pd.read_sql("SELECT * FROM readings ORDER BY d", c)
-    c.close()
+    conn = get_conn()
+    if not conn:
+        return pd.DataFrame()
+
+    df = pd.read_sql("SELECT * FROM readings ORDER BY d", conn)
+    conn.close()
 
     if len(df) > 0:
-        # convert invalid dates to NaT instead of crashing
         df["d"] = pd.to_datetime(df["d"], errors="coerce")
-        # drop any rows where date could not be parsed
         df = df[df["d"].notna()]
 
     return df
@@ -217,13 +218,17 @@ def add_cartridge(d, dp, remarks, is_change, cost):
 
 
 def get_cartridge():
+    """Return all cartridge DP records as a DataFrame sorted by date."""
     conn = get_conn()
-    if not conn: return pd.DataFrame()
-    df = pd.read_sql("SELECT * FROM cartridge ORDER ORDER BY d", conn)
+    if not conn:
+        return pd.DataFrame()
+
+    df = pd.read_sql("SELECT * FROM cartridge ORDER BY d", conn)
     conn.close()
+
     if len(df) > 0:
-     df["d"] = pd.to_datetime(df["d"], errors="coerce")
-df = df[df["d"].notna()]
+        df["d"] = pd.to_datetime(df["d"], errors="coerce")
+        df = df[df["d"].notna()]
 
     return df
 
@@ -265,22 +270,20 @@ def record_chemical_movement(d, name, mov, qty, remarks):
 
 
 def get_chemical_movements():
+    """Return all chemical movement records as a DataFrame sorted by date."""
     conn = get_conn()
-    if not conn: return pd.DataFrame()
+    if not conn:
+        return pd.DataFrame()
+
     df = pd.read_sql("SELECT * FROM chemical_movements ORDER BY d", conn)
     conn.close()
+
     if len(df) > 0:
-   df["d"] = pd.to_datetime(df["d"], errors="coerce")
-df = df[df["d"].notna()]
+        df["d"] = pd.to_datetime(df["d"], errors="coerce")
+        df = df[df["d"].notna()]
+
     return df
 
-
-# Initialize database when app starts
-init_postgres()
-
-# ============================================================
-# 5) EMERALD UI COMPONENTS
-# ============================================================
 
 def kpi_card(title, value, color=EMERALD_GREEN):
     st.markdown(
