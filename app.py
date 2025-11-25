@@ -23,6 +23,25 @@ DARK_GREEN = "#0E6655"
 LIGHT_BG = "#ECF8F6"
 WHITE = "#FFFFFF"
 GREY = "#666666"
+# Fixed list of chemicals used in Um Qasr RO
+CHEMICAL_SETTINGS = {
+    "HCL": {
+        "display_name": "HCL (Hydrochloric Acid)",
+        "min_level": 50,   # kg – reorder below this
+        "max_level": 200   # kg – normal full stock
+    },
+    "BC": {
+        "display_name": "BC (Biocide)",
+        "min_level": 50,
+        "max_level": 200
+    },
+    "Chlorine": {
+        "display_name": "Chlorine",
+        "min_level": 50,
+        "max_level": 200
+    },
+}
+
 
 st.set_page_config(
     page_title="NPS RO System – Um Qasr",
@@ -544,6 +563,11 @@ def page_chemicals():
     chem_df = get_chemicals()
     mov_df = get_chemical_movements()
 
+    # Make sure we only see the 3 official chemicals, in fixed order
+    allowed_names = list(CHEMICAL_SETTINGS.keys())
+    if len(chem_df) > 0:
+        chem_df = chem_df[chem_df["name"].isin(allowed_names)].copy()
+
     tab1, tab2, tab3 = st.tabs(["📦 Stock & Cost", "➕ Record IN / OUT", "📜 Movements History"])
 
     # ---------- TAB 1: STOCK & COST ----------
@@ -554,39 +578,207 @@ def page_chemicals():
             st.info("No chemicals found in database.")
         else:
             # Ensure numeric types for qty and unit_cost
-            chem_df = chem_df.copy()
-            chem_df["qty"] = pd.to_numeric(chem_df["qty"], errors="coerce").fillna(0)
-            chem_df["unit_cost"] = pd.to_numeric(chem_df["unit_cost"], errors="coerce").fillna(0)
+            chem_df["qty"] = pd.to_numeric(chem_df["qty"], errors="coerce").fillna(0.0)
+            chem_df["unit_cost"] = pd.to_numeric(chem_df["unit_cost"], errors="coerce").fillna(0.0)
 
-            disp = chem_df.copy()
-            disp["stock_value"] = disp["qty"] * disp["unit_cost"]
+            # Add min/max & status from CHEMICAL_SETTINGS
+            chem_df["min_level"] = chem_df["name"].map(lambda n: CHEMICAL_SETTINGS.get(n, {}).get("min_level", 0))
+            chem_df["max_level"] = chem_df["name"].map(lambda n: CHEMICAL_SETTINGS.get(n, {}).get("max_level", 0))
+            chem_df["display_name"] = chem_df["name"].map(
+                lambda n: CHEMICAL_SETTINGS.get(n, {}).get("display_name", n)
+            )
+
+            def status_from_row(row):
+                if row["qty"] <= 0:
+                    return "EMPTY"
+                if row["qty"] < row["min_level"]:
+                    return "LOW"
+                if row["qty"] > row["max_level"]:
+                    return "HIGH"
+                return "OK"
+
+            chem_df["status"] = chem_df.apply(status_from_row, axis=1)
+            chem_df["stock_value"] = chem_df["qty"] * chem_df["unit_cost"]
+
+            # KPI cards
+            total_stock_value = float(chem_df["stock_value"].sum())
+            total_qty = float(chem_df["qty"].sum())
+            low_count = int((chem_df["status"] == "LOW").sum() + (chem_df["status"] == "EMPTY").sum())
+
+            col_k1, col_k2, col_k3 = st.columns(3)
+            with col_k1:
+                kpi_card("Total Stock (kg)", f"{total_qty:,.1f}")
+            with col_k2:
+                kpi_card("Total Stock Value", f"{total_stock_value:,.0f}")
+            with col_k3:
+                kpi_card("Low / Empty Items", f"{low_count}")
+
+            # Display table with status
+            disp = chem_df[
+                [
+                    "display_name",
+                    "qty",
+                    "min_level",
+                    "max_level",
+                    "unit_cost",
+                    "stock_value",
+                    "status",
+                ]
+            ].rename(
+                columns={
+                    "display_name": "Chemical",
+                    "qty": "Qty (kg)",
+                    "min_level": "Min level (kg)",
+                    "max_level": "Max level (kg)",
+                    "unit_cost": "Unit cost",
+                    "stock_value": "Stock value",
+                }
+            )
 
             st.dataframe(disp, use_container_width=True)
 
+            # Status messages / alerts
+            for _, row in chem_df.iterrows():
+                nm = row["display_name"]
+                qty = float(row["qty"])
+                min_level = float(row["min_level"])
+                max_level = float(row["max_level"])
+                status = row["status"]
+
+                if status == "EMPTY":
+                    st.error(f"🔴 {nm}: stock is EMPTY (0 kg) – urgent reorder.")
+                elif status == "LOW":
+                    st.warning(f"🟠 {nm}: low stock ({qty:.1f} kg, below {min_level:.1f} kg) – plan reorder.")
+                elif status == "HIGH":
+                    st.info(f"ℹ️ {nm}: above normal level ({qty:.1f} kg, normal up to {max_level:.1f} kg).")
+                else:
+                    st.success(f"🟢 {nm}: stock OK ({qty:.1f} kg).")
+
+            # Simple bar chart for quick view
+            section_title("Stock by Chemical (kg)")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            ax.bar(chem_df["display_name"], chem_df["qty"])
+            ax.set_ylabel("Qty (kg)")
+            ax.grid(alpha=0.3, axis="y")
+            plt.xticks(rotation=0)
+            st.pyplot(fig)
+
+            # ---- Unit cost update section ----
             st.markdown("<div class='sub-header'>Update Unit Cost (per kg)</div>", unsafe_allow_html=True)
 
             c1, c2, c3 = st.columns([1, 1, 0.6])
             with c1:
                 chem_name = st.selectbox(
                     "Chemical",
-                    chem_df["name"].tolist(),
-                    key="chem_cost_name"
+                    allowed_names,
+                    key="chem_cost_name",
                 )
             with c2:
-                current_cost = float(
-                    chem_df.loc[chem_df["name"] == chem_name, "unit_cost"].iloc[0]
-                )
+                if chem_name in chem_df["name"].values:
+                    current_cost = float(
+                        chem_df.loc[chem_df["name"] == chem_name, "unit_cost"].iloc[0]
+                    )
+                else:
+                    current_cost = 0.0
+
                 new_cost = st.number_input(
                     "Unit Cost (per kg)",
                     min_value=0.0,
                     step=0.1,
                     value=current_cost,
-                    key="chem_unit_cost"
+                    key="chem_unit_cost",
                 )
             with c3:
                 if st.button("💾 Save Cost", key="save_cost_btn"):
                     update_chemical_cost(chem_name, new_cost)
                     st.success(f"✅ Unit cost updated for {chem_name}.")
+
+    # ---------- TAB 2: RECORD MOVEMENTS ----------
+    with tab2:
+        section_title("Record Chemical IN / OUT")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            d = st.date_input("Date", value=date.today(), key="chem_date")
+        with c2:
+            name = st.selectbox(
+                "Chemical",
+                allowed_names,
+                key="chem_name_select",
+            )
+        with c3:
+            movement_type = st.selectbox("Movement Type", ["IN", "OUT"], key="chem_move_type")
+
+        qty = st.number_input("Quantity (kg)", min_value=0.0, step=0.1, key="chem_qty")
+        remarks = st.text_input(
+            "Remarks / reference (invoice, batch, etc.)",
+            key="chem_remarks",
+        )
+
+        if st.button("💾 Save Movement", key="chem_move_save"):
+            if qty <= 0:
+                st.error("Quantity must be greater than 0.")
+            else:
+                record_chemical_movement(str(d), name, movement_type, qty, remarks)
+                st.success(f"✅ {movement_type} movement recorded for {name}.")
+
+    # ---------- TAB 3: HISTORY ----------
+    with tab3:
+        section_title("Chemical Movements History")
+
+        if len(mov_df) == 0:
+            st.info("No chemical movements recorded yet.")
+        else:
+            mov_df = mov_df.copy()
+            mov_df["d"] = pd.to_datetime(mov_df["d"], errors="coerce")
+            mov_df = mov_df[mov_df["d"].notna()]
+            mov_df = mov_df[mov_df["name"].isin(allowed_names)]
+
+            # Filters
+            with st.expander("🔍 Filter history"):
+                sel_chems = st.multiselect(
+                    "Chemical",
+                    allowed_names,
+                    default=allowed_names,
+                )
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    from_date = st.date_input(
+                        "From date",
+                        value=mov_df["d"].min().date() if len(mov_df) > 0 else date.today(),
+                        key="mov_from",
+                    )
+                with col_f2:
+                    to_date = st.date_input(
+                        "To date",
+                        value=mov_df["d"].max().date() if len(mov_df) > 0 else date.today(),
+                        key="mov_to",
+                    )
+
+            mask = (mov_df["name"].isin(sel_chems)) & (mov_df["d"].dt.date >= from_date) & (
+                mov_df["d"].dt.date <= to_date
+            )
+            mov_f = mov_df[mask].sort_values("d")
+
+            st.dataframe(mov_f, use_container_width=True)
+
+            # 30-day usage summary
+            section_title("Last 30 Days – Usage Summary (OUT only)")
+            last_30 = mov_df[mov_df["d"] >= (datetime.now() - pd.Timedelta(days=30))]
+            last_30_out = last_30[last_30["movement_type"] == "OUT"]
+
+            if len(last_30_out) > 0:
+                summary = last_30_out.groupby("name")["qty"].sum().reset_index()
+                summary["display_name"] = summary["name"].map(
+                    lambda n: CHEMICAL_SETTINGS.get(n, {}).get("display_name", n)
+                )
+                summary = summary[["display_name", "qty"]].rename(
+                    columns={"display_name": "Chemical", "qty": "Qty OUT (kg, last 30 days)"}
+                )
+                st.dataframe(summary, use_container_width=True)
+            else:
+                st.info("No OUT movements in the last 30 days.")
+
 
     # ---------- TAB 2: RECORD MOVEMENTS ----------
     with tab2:
