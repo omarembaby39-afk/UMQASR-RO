@@ -194,11 +194,13 @@ def get_readings():
     c = conn()
     df = pd.read_sql("SELECT * FROM readings ORDER BY d", c)
     c.close()
+
     if len(df) > 0:
-        # convert invalid dates to NaT instead of raising error
+        # convert invalid dates to NaT instead of crashing
         df["d"] = pd.to_datetime(df["d"], errors="coerce")
         # drop any rows where date could not be parsed
         df = df[df["d"].notna()]
+
     return df
 
 
