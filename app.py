@@ -262,18 +262,11 @@ def record_chemical_movement(d, name, mov, qty, remarks):
     # Update stock
     if mov == "IN":
         cur.execute("UPDATE chemicals SET qty = qty + %s WHERE name = %s", (qty, name))
-      if len(chem_df) == 0:
-        st.info("No chemicals found in database.")
     else:
-        # Make sure qty and unit_cost are numeric
-        chem_df = chem_df.copy()
-        chem_df["qty"] = pd.to_numeric(chem_df["qty"], errors="coerce").fillna(0)
-        chem_df["unit_cost"] = pd.to_numeric(chem_df["unit_cost"], errors="coerce").fillna(0)
+        cur.execute("UPDATE chemicals SET qty = GREATEST(qty - %s, 0) WHERE name = %s", (qty, name))
 
-        disp = chem_df.copy()
-        disp["stock_value"] = disp["qty"] * disp["unit_cost"]
-
-        st.dataframe(disp, use_container_width=True)
+    conn.commit()
+    conn.close()
 
 
 def get_chemical_movements():
@@ -457,18 +450,12 @@ def page_dashboard():
 
     section_title("Chemical Stock Levels")
 
-    if len(chem_df) == 0:
-        st.info("No chemicals found in database.")
+    if len(chem) == 0:
+        st.info("No chemicals found.")
     else:
-        # Make sure qty and unit_cost are numeric
-        chem_df = chem_df.copy()
-        chem_df["qty"] = pd.to_numeric(chem_df["qty"], errors="coerce").fillna(0)
-        chem_df["unit_cost"] = pd.to_numeric(chem_df["unit_cost"], errors="coerce").fillna(0)
-
-        disp = chem_df.copy()
-        disp["stock_value"] = disp["qty"] * disp["unit_cost"]
-
-        st.dataframe(disp, use_container_width=True)
+        df_disp = chem.copy()
+        df_disp["stock_value"] = df_disp["qty"] * df_disp["unit_cost"]
+        st.dataframe(df_disp, use_container_width=True)
 
         for _, row in chem.iterrows():
             nm = row["name"]
@@ -566,8 +553,14 @@ def page_chemicals():
         if len(chem_df) == 0:
             st.info("No chemicals found in database.")
         else:
+            # Ensure numeric types for qty and unit_cost
+            chem_df = chem_df.copy()
+            chem_df["qty"] = pd.to_numeric(chem_df["qty"], errors="coerce").fillna(0)
+            chem_df["unit_cost"] = pd.to_numeric(chem_df["unit_cost"], errors="coerce").fillna(0)
+
             disp = chem_df.copy()
             disp["stock_value"] = disp["qty"] * disp["unit_cost"]
+
             st.dataframe(disp, use_container_width=True)
 
             st.markdown("<div class='sub-header'>Update Unit Cost (per kg)</div>", unsafe_allow_html=True)
