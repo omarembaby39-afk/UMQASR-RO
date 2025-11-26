@@ -895,7 +895,19 @@ def page_filters():
             st.success("Cartridge filter reading saved.")
 
     with col_table:
-        st.subheader("Histo
+        st.subheader("History")
+        days_back = st.slider("Show last N days", 7, 120, 30)
+        start_date = datetime.date.today() - datetime.timedelta(days=days_back)
+        df = fetch_df(
+            "SELECT * FROM cartridge_filters WHERE entry_date >= %s "
+            "ORDER BY entry_date DESC, id DESC",
+            (start_date,),
+        )
+        if df.empty:
+            st.info("No cartridge filter logs for selected period.")
+        else:
+            st.dataframe(df)
+
 # =========================
 # MAINTENANCE LOG (simple)
 # =========================
