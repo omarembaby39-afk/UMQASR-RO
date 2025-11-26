@@ -1,5 +1,5 @@
 # Um Qasr RO System - Single File App
-# Global RO Dashboard with Neon PostgreSQL backend
+# Global RO Dashboard + Water Quality + Advanced CMMS
 
 import streamlit as st
 import pandas as pd
@@ -13,8 +13,14 @@ from psycopg2.extras import RealDictCursor
 # CONFIG
 # =========================
 
-DB_URL = "postgresql://neondb_owner:npg_C4ghxK1yUcfw@ep-billowing-fog-agxbr2fc-pooler.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+DB_URL = (
+    "postgresql://neondb_owner:npg_C4ghxK1yUcfw@"
+    "ep-billowing-fog-agxbr2fc-pooler.c-2.eu-central-1.aws.neon.tech/"
+    "neondb?sslmode=require&channel_binding=require"
+)
 
+# CMMS start of operation
+CMMS_START_DATE = datetime.date(2025, 8, 1)
 
 # =========================
 # DB HELPERS
@@ -24,8 +30,26 @@ def get_conn():
     return psycopg2.connect(DB_URL)
 
 
+def run_query(sql, params=None, fetch=False):
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(sql, params or [])
+    data = cur.fetchall() if fetch else None
+    conn.commit()
+    cur.close()
+    conn.close()
+    return data
+
+
+def fetch_df(sql, params=None):
+    conn = get_conn()
+    df = pd.read_sql(sql, conn, params=params)
+    conn.close()
+    return df
+
+
 def init_db():
-    """Create tables if they do not exist."""
+    """Create base tables if not exist."""
     ddl_statements = [
         """
         CREATE TABLE IF NOT EXISTS flowmeter_readings (
@@ -115,6 +139,35 @@ def init_db():
             operator VARCHAR(100),
             notes TEXT
         );
+        """,
+        # CMMS master tasks
+        """
+        CREATE TABLE IF NOT EXISTS maintenance_master (
+            id SERIAL PRIMARY KEY,
+            task_name TEXT NOT NULL,
+            frequency VARCHAR(20) NOT NULL,
+            interval_days INTEGER NOT NULL,
+            category VARCHAR(20),
+            default_priority VARCHAR(20),
+            estimated_hours NUMERIC(6,2),
+            active BOOLEAN DEFAULT TRUE
+        );
+        """,
+        # CMMS work orders
+        """
+        CREATE TABLE IF NOT EXISTS maintenance_workorders (
+            id SERIAL PRIMARY KEY,
+            master_id INTEGER REFERENCES maintenance_master(id),
+            due_date DATE NOT NULL,
+            status VARCHAR(20) DEFAULT 'Pending',
+            priority VARCHAR(20),
+            technician VARCHAR(100),
+            estimated_hours NUMERIC(6,2),
+            actual_hours NUMERIC(6,2),
+            cost NUMERIC(12,2),
+            completion_date DATE,
+            remarks TEXT
+        );
         """
     ]
     conn = get_conn()
@@ -124,26 +177,6 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
-
-
-def run_query(sql, params=None, fetch=False):
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute(sql, params or [])
-    data = None
-    if fetch:
-        data = cur.fetchall()
-    conn.commit()
-    cur.close()
-    conn.close()
-    return data
-
-
-def fetch_df(sql, params=None):
-    conn = get_conn()
-    df = pd.read_sql(sql, conn, params=params)
-    conn.close()
-    return df
 
 
 # =========================
@@ -205,20 +238,16 @@ def export_simple_pdf(title: str, lines: list) -> BytesIO:
 
 THEME_CSS = """
 <style>
-/* Global dark blue gradient SCADA theme */
 body {
     background: radial-gradient(circle at top left, #021b3a, #000814 55%, #001233 100%);
     color: #f4f4f4;
     font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
 }
-
 .block-container {
     padding-top: 1.5rem;
     padding-bottom: 2rem;
     max-width: 1300px;
 }
-
-/* Titles */
 .top-title {
     font-size: 2rem;
     font-weight: 700;
@@ -231,8 +260,6 @@ body {
     color: #8fb9ff;
     margin-bottom: 1.5rem;
 }
-
-/* KPI cards */
 .kpi-card {
     background: linear-gradient(135deg, rgba(0, 180, 255, 0.15), rgba(0, 0, 0, 0.65));
     border-radius: 12px;
@@ -251,8 +278,6 @@ body {
     font-weight: 700;
     color: #e8f7ff;
 }
-
-/* Status pills */
 .status-pill {
     display: inline-block;
     padding: 0.2rem 0.65rem;
@@ -275,16 +300,23 @@ body {
     color: #ff5252;
     border: 1px solid rgba(244, 67, 54, 0.7);
 }
-
-/* Sidebar */
+/* Emerald chemical tags */
+.chem-tag {
+    display:inline-block;
+    padding:0.15rem 0.6rem;
+    border-radius:999px;
+    border:1px solid #10b981cc;
+    background:rgba(16,185,129,0.18);
+    color:#d1fae5;
+    font-size:0.8rem;
+    margin-right:0.25rem;
+}
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #001845, #000814);
 }
 section[data-testid="stSidebar"] * {
     color: #e0f4ff;
 }
-
-/* Tables */
 .dataframe tbody tr:nth-child(odd) {
     background-color: rgba(3, 37, 76, 0.7);
 }
@@ -295,8 +327,6 @@ section[data-testid="stSidebar"] * {
     background-color: rgba(0, 119, 182, 0.85);
     color: #ffffff;
 }
-
-/* Buttons */
 .stButton>button, .stDownloadButton>button {
     border-radius: 999px;
     padding: 0.4rem 1.1rem;
@@ -316,14 +346,121 @@ section[data-testid="stSidebar"] * {
 def apply_theme():
     st.markdown(THEME_CSS, unsafe_allow_html=True)
 # =========================
-# PAGES
+# CMMS MASTER DATA FROM HANDBOOK
+# =========================
+
+FREQUENCY_INFO = {
+    "Daily": ("daily", 1),
+    "Weekly": ("weekly", 7),
+    "Monthly": ("monthly", 30),
+    "Quarterly": ("quarterly", 90),
+    "Semi-Annual": ("semi_annual", 180),
+    "Annual": ("annual", 365),
+}
+
+MAINTENANCE_TASKS = [
+    # Daily
+    ("Daily", "Check TDS, pressure, and flow rates via the PLC/HMI"),
+    ("Daily", "Inspect for leaks in piping and fittings"),
+    ("Daily", "Verify chemical dosing levels (antiscalant, sodium hypochlorite)"),
+    ("Daily", "Record water quality parameters in the log (feed and product water TDS, pH)"),
+    # Weekly
+    ("Weekly", "Inspect cartridge filters for clogging and replace if pressure drop exceeds 1 bar"),
+    ("Weekly", "Test chlorine levels in feed water (target 0.5–1 ppm)"),
+    ("Weekly", "Check UV sterilizer lamp operation and clean quartz sleeve if needed"),
+    ("Weekly", "Review incident log for recurring issues and address them promptly"),
+    # Monthly
+    ("Monthly", "Conduct inspection of high-pressure pumps for noise, vibration, overheating"),
+    ("Monthly", "Test feed water hardness and adjust antiscalant dosing if necessary"),
+    ("Monthly", "Backwash calcite filter to prevent clogging and ensure remineralization"),
+    ("Monthly", "Verify PLC/HMI functionality and back up system settings"),
+    # Quarterly
+    ("Quarterly", "Replace cartridge filters (or sooner if clogged)"),
+    ("Quarterly", "Perform light chemical cleaning of RO membranes to remove scaling/fouling"),
+    ("Quarterly", "Inspect all electrical connections and tighten if needed"),
+    # Semi-Annual
+    ("Semi-Annual", "Perform deep chemical cleaning of RO membranes (acid + biocide)"),
+    ("Semi-Annual", "Replace O-rings and seals in pumps and pressure vessels if worn"),
+    ("Semi-Annual", "Calibrate pressure and TDS sensors on PLC system"),
+    # Annual
+    ("Annual", "Replace UV sterilizer lamp (typical lifespan 12 months)"),
+    ("Annual", "Conduct full system audit, including pressure vessel integrity and membranes"),
+    ("Annual", "Review and update O&M manual if system modifications are made"),
+]
+
+
+def seed_maintenance_master():
+    """Insert handbook tasks into maintenance_master if table is empty."""
+    row = run_query("SELECT COUNT(*) AS c FROM maintenance_master", fetch=True)[0]
+    if row["c"] > 0:
+        return
+
+    for category, task_name in MAINTENANCE_TASKS:
+        freq_code, interval_days = FREQUENCY_INFO[category]
+        run_query(
+            """
+            INSERT INTO maintenance_master
+            (task_name, frequency, interval_days, category, default_priority, estimated_hours, active)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                task_name,
+                freq_code,
+                interval_days,
+                category,
+                "Medium",
+                2.0,
+                True,
+            ),
+            fetch=False,
+        )
+
+
+def generate_cmms_schedule(start_date: datetime.date, days_ahead: int = 365):
+    """Generate work orders from master tasks within a window."""
+    end_date = start_date + datetime.timedelta(days=days_ahead)
+    masters = run_query(
+        "SELECT id, interval_days, default_priority FROM maintenance_master WHERE active = TRUE",
+        fetch=True,
+    )
+    if not masters:
+        return
+
+    for m in masters:
+        mid = m["id"]
+        interval = int(m["interval_days"])
+        priority = m["default_priority"] or "Medium"
+        d = start_date
+        while d <= end_date:
+            existing = run_query(
+                "SELECT id FROM maintenance_workorders WHERE master_id=%s AND due_date=%s LIMIT 1",
+                (mid, d),
+                fetch=True,
+            )
+            if not existing:
+                run_query(
+                    """
+                    INSERT INTO maintenance_workorders
+                    (master_id, due_date, status, priority, estimated_hours)
+                    VALUES (%s,%s,'Pending',%s,%s)
+                    """,
+                    (mid, d, priority, 2.0),
+                    fetch=False,
+                )
+            d += datetime.timedelta(days=interval)
+
+
+# =========================
+# DASHBOARD PAGE
 # =========================
 
 def page_dashboard():
     apply_theme()
     st.markdown("<div class='top-title'>RO Plant – Production & Health Dashboard</div>", unsafe_allow_html=True)
-    st.markdown("<div class='subtitle'>Today KPIs, monthly performance, water quality and system status</div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        "<div class='subtitle'>KPI overview – production, cartridge filters, chemicals, water quality</div>",
+        unsafe_allow_html=True,
+    )
 
     today = datetime.date.today()
     first_month = today.replace(day=1)
@@ -331,9 +468,8 @@ def page_dashboard():
     # Production this month
     df_prod = fetch_df(
         "SELECT * FROM daily_production WHERE prod_date >= %s AND prod_date <= %s ORDER BY prod_date",
-        (first_month, today)
+        (first_month, today),
     )
-
     if df_prod.empty:
         today_val = 0.0
         month_total = 0.0
@@ -380,10 +516,9 @@ def page_dashboard():
     # Latest permeate water quality
     df_wq = fetch_df(
         "SELECT * FROM water_quality WHERE point=%s ORDER BY sample_date DESC, sample_time DESC, id DESC LIMIT 1",
-        ("Permeate",)
+        ("Permeate",),
     )
-    last_tds = None
-    last_ph = None
+    last_tds = last_ph = None
     if not df_wq.empty:
         last_tds = float(df_wq["tds"].iloc[0] or 0)
         last_ph = float(df_wq["ph"].iloc[0] or 0)
@@ -449,7 +584,6 @@ def page_dashboard():
             )
 
     st.markdown("---")
-
     col_chart, col_alerts = st.columns([2, 1])
 
     with col_chart:
@@ -468,11 +602,14 @@ def page_dashboard():
                 st.write("• " + msg)
         else:
             st.success("No chemical stock alerts.")
-
         if diff_val is not None and diff_val >= 2:
             st.error(f"Cartridge filter ΔP high: {diff_val:.2f} bar – change filter.")
         elif diff_val is not None and diff_val >= 1:
-            st.warning(f"Cartridge filter ΔP elevated: {diff_val:.2f} bar – monitor.")
+            st.warning(f"Cartridge filter ΔP elevated: {diff_val:.2f} bar – monitor closely.")
+# =========================
+# FLOWMETER & PRODUCTION
+# =========================
+
 def page_flowmeter():
     apply_theme()
     st.markdown("<div class='top-title'>Flowmeter Readings</div>", unsafe_allow_html=True)
@@ -493,9 +630,9 @@ def page_flowmeter():
                 INSERT INTO flowmeter_readings (reading_date, reading_value, operator, notes)
                 VALUES (%s,%s,%s,%s)
                 ON CONFLICT (reading_date)
-                DO UPDATE SET reading_value = EXCLUDED.reading_value,
-                              operator = EXCLUDED.operator,
-                              notes = EXCLUDED.notes;
+                DO UPDATE SET reading_value=EXCLUDED.reading_value,
+                              operator=EXCLUDED.operator,
+                              notes=EXCLUDED.notes;
                 """,
                 (date_val, reading, operator or None, notes or None),
                 fetch=False,
@@ -523,9 +660,7 @@ def page_flowmeter():
         if df_all.shape[0] < 2:
             st.warning("Need at least 2 readings to calculate daily production.")
         else:
-            # Clear old data
             run_query("DELETE FROM daily_production;", fetch=False)
-
             last_val = None
             current_month = None
             cumulative_month = 0.0
@@ -540,7 +675,6 @@ def page_flowmeter():
                     prod = max(val - last_val, 0.0)
                 last_val = val
 
-                # month handling
                 if current_month is None or d.month != current_month.month or d.year != current_month.year:
                     cumulative_month = prod
                     current_month = d
@@ -549,8 +683,11 @@ def page_flowmeter():
                 cumulative_total += prod
 
                 run_query(
-                    "INSERT INTO daily_production (prod_date, prod_value, cumulative_month, cumulative_total) "
-                    "VALUES (%s,%s,%s,%s)",
+                    """
+                    INSERT INTO daily_production
+                    (prod_date, prod_value, cumulative_month, cumulative_total)
+                    VALUES (%s,%s,%s,%s)
+                    """,
                     (d, prod, cumulative_month, cumulative_total),
                     fetch=False,
                 )
@@ -573,7 +710,6 @@ def page_production():
         "SELECT * FROM daily_production WHERE prod_date >= %s AND prod_date <= %s ORDER BY prod_date",
         (start_date, end_date),
     )
-
     if df.empty:
         st.info("No production records for selected period.")
         return
@@ -595,7 +731,6 @@ def page_production():
     st.markdown("---")
     st.subheader("Export")
 
-    # Excel
     buf_x = export_df_to_excel(df, sheet_name="Production")
     st.download_button(
         "⬇️ Download production_report.xlsx",
@@ -604,7 +739,6 @@ def page_production():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # PDF
     lines = [f"Production report from {start_date} to {end_date}", ""]
     for _, r in df.iterrows():
         lines.append(
@@ -617,27 +751,42 @@ def page_production():
         file_name="production_report.pdf",
         mime="application/pdf",
     )
+
+
+# =========================
+# CHEMICALS (HCL / BC / CHLORINE)
+# =========================
+
+CHEMICALS = ["HCL", "BC", "Chlorine"]
+
+
 def page_chemicals():
     apply_theme()
     st.markdown("<div class='top-title'>Chemical Movement IN / OUT</div>", unsafe_allow_html=True)
-    st.markdown("<div class='subtitle'>Track antiscalant, chlorine, caustic, bisulfite stock and usage</div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        "<div class='subtitle'>Emerald control for HCL, BC, Chlorine dosing and stock</div>",
+        unsafe_allow_html=True,
+    )
 
-    chemicals = ["Antiscalant", "Chlorine", "Caustic", "Sodium Bisulfite"]
+    st.markdown(
+        "<p><span class='chem-tag'>HCL</span>"
+        "<span class='chem-tag'>BC (Biocide)</span>"
+        "<span class='chem-tag'>Chlorine</span></p>",
+        unsafe_allow_html=True,
+    )
 
     col_form, col_table = st.columns([1, 2])
 
     with col_form:
         st.subheader("Record Movement")
         m_date = st.date_input("Date", datetime.date.today())
-        chem = st.selectbox("Chemical", chemicals)
+        chem = st.selectbox("Chemical", CHEMICALS)
         qty_in = st.number_input("Qty IN", min_value=0.0, step=0.1)
         qty_out = st.number_input("Qty OUT", min_value=0.0, step=0.1)
         operator = st.text_input("Operator", "")
         notes = st.text_area("Notes", "")
 
         if st.button("💾 Save Movement"):
-            # get last balance
             df_last = fetch_df(
                 "SELECT balance FROM chemicals_movement WHERE chemical=%s "
                 "ORDER BY movement_date DESC, id DESC LIMIT 1",
@@ -647,19 +796,20 @@ def page_chemicals():
             new_bal = last_bal + qty_in - qty_out
 
             run_query(
-                "INSERT INTO chemicals_movement "
-                "(movement_date, chemical, qty_in, qty_out, balance, operator, notes) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                """
+                INSERT INTO chemicals_movement
+                (movement_date, chemical, qty_in, qty_out, balance, operator, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """,
                 (m_date, chem, qty_in or None, qty_out or None, new_bal, operator or None, notes or None),
                 fetch=False,
             )
-            # update stock
             run_query(
                 """
                 INSERT INTO chemicals_stock (chemical, stock_qty)
                 VALUES (%s,%s)
                 ON CONFLICT (chemical)
-                DO UPDATE SET stock_qty = EXCLUDED.stock_qty;
+                DO UPDATE SET stock_qty=EXCLUDED.stock_qty;
                 """,
                 (chem, new_bal),
                 fetch=False,
@@ -689,11 +839,17 @@ def page_chemicals():
         st.dataframe(df_stock)
 
 
+# =========================
+# CARTRIDGE FILTERS
+# =========================
+
 def page_filters():
     apply_theme()
     st.markdown("<div class='top-title'>Cartridge Filter Status</div>", unsafe_allow_html=True)
-    st.markdown("<div class='subtitle'>Pressure before & after, differential and color-coded condition</div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        "<div class='subtitle'>Pressure before & after, differential and color-coded condition</div>",
+        unsafe_allow_html=True,
+    )
 
     col_form, col_table = st.columns([1, 2])
 
@@ -713,7 +869,7 @@ def page_filters():
         elif diff < 2:
             status = "Warning"
             status_class = "status-warn"
-            msg = "Monitor filter, getting loaded."
+            msg = "Monitor filter – getting loaded."
         else:
             status = "Alarm"
             status_class = "status-alarm"
@@ -728,33 +884,26 @@ def page_filters():
 
         if st.button("💾 Save Reading"):
             run_query(
-                "INSERT INTO cartridge_filters "
-                "(entry_date, pressure_before, pressure_after, diff_pressure, status, operator, notes) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                """
+                INSERT INTO cartridge_filters
+                (entry_date, pressure_before, pressure_after, diff_pressure, status, operator, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """,
                 (d, p_before, p_after, diff, status, operator or None, notes or None),
                 fetch=False,
             )
             st.success("Cartridge filter reading saved.")
 
     with col_table:
-        st.subheader("History")
-        days_back = st.slider("Show last N days", 7, 120, 30)
-        start_date = datetime.date.today() - datetime.timedelta(days=days_back)
-        df = fetch_df(
-            "SELECT * FROM cartridge_filters WHERE entry_date >= %s "
-            "ORDER BY entry_date DESC, id DESC",
-            (start_date,),
-        )
-        if df.empty:
-            st.info("No cartridge filter logs for selected period.")
-        else:
-            st.dataframe(df)
+        st.subheader("Histo
+# =========================
+# MAINTENANCE LOG (simple)
+# =========================
 
-
-def page_maintenance():
+def page_maintenance_log():
     apply_theme()
-    st.markdown("<div class='top-title'>Maintenance Logs</div>", unsafe_allow_html=True)
-    st.markdown("<div class='subtitle'>Record preventive and corrective maintenance for RO system</div>",
+    st.markdown("<div class='top-title'>Maintenance Log</div>", unsafe_allow_html=True)
+    st.markdown("<div class='subtitle'>Record corrective / extra maintenance not in CMMS</div>",
                 unsafe_allow_html=True)
 
     col_form, col_table = st.columns([1, 2])
@@ -762,16 +911,18 @@ def page_maintenance():
     with col_form:
         st.subheader("Log Maintenance")
         d = st.date_input("Maintenance Date", datetime.date.today())
-        component = st.text_input("Component (e.g., HP Pump, Cartridge Filter, RO Skid)")
+        component = st.text_input("Component (e.g., HP Pump, RO Skid)")
         action = st.text_area("Action / Work Done")
         operator = st.text_input("Technician / Operator")
         notes = st.text_area("Notes", "")
 
         if st.button("💾 Save Maintenance Record"):
             run_query(
-                "INSERT INTO maintenance_log "
-                "(maint_date, component, action, operator, notes) "
-                "VALUES (%s,%s,%s,%s,%s)",
+                """
+                INSERT INTO maintenance_log
+                (maint_date, component, action, operator, notes)
+                VALUES (%s,%s,%s,%s,%s)
+                """,
                 (d, component or None, action or None, operator or None, notes or None),
                 fetch=False,
             )
@@ -792,6 +943,10 @@ def page_maintenance():
             st.dataframe(df)
 
 
+# =========================
+# SYSTEM STATUS
+# =========================
+
 def page_system_status():
     apply_theme()
     st.markdown("<div class='top-title'>Pumps & System Status</div>", unsafe_allow_html=True)
@@ -811,8 +966,10 @@ def page_system_status():
 
         if st.button("💾 Save Status Snapshot"):
             run_query(
-                "INSERT INTO system_status (hp_pump, lp_pump, feed_pump, ro_running) "
-                "VALUES (%s,%s,%s,%s)",
+                """
+                INSERT INTO system_status (hp_pump, lp_pump, feed_pump, ro_running)
+                VALUES (%s,%s,%s,%s)
+                """,
                 (hp, lp, feed, ro),
                 fetch=False,
             )
@@ -820,13 +977,17 @@ def page_system_status():
 
     with col_table:
         st.subheader("Recent Status Log")
-        df = fetch_df(
-            "SELECT * FROM system_status ORDER BY status_time DESC LIMIT 100"
-        )
+        df = fetch_df("SELECT * FROM system_status ORDER BY status_time DESC LIMIT 100")
         if df.empty:
             st.info("No status snapshots logged yet.")
         else:
             st.dataframe(df)
+
+
+# =========================
+# WATER QUALITY
+# =========================
+
 def page_water_quality():
     apply_theme()
     st.markdown("<div class='top-title'>Water Quality Monitoring</div>", unsafe_allow_html=True)
@@ -851,9 +1012,11 @@ def page_water_quality():
 
         if st.button("💾 Save Sample"):
             run_query(
-                "INSERT INTO water_quality "
-                "(sample_date, sample_time, point, tds, ph, conductivity, turbidity, operator, notes) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                """
+                INSERT INTO water_quality
+                (sample_date, sample_time, point, tds, ph, conductivity, turbidity, operator, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
                 (d, t, point, tds or None, ph or None, cond or None, turb or None, operator or None, notes or None),
                 fetch=False,
             )
@@ -895,12 +1058,229 @@ def page_water_quality():
         with col2:
             st.caption("Permeate pH")
             st.line_chart(df_perm["ph"])
+# =========================
+# ADVANCED CMMS PAGE (WORK ORDERS)
+# =========================
 
+def page_cmms():
+    apply_theme()
+    st.markdown("<div class='top-title'>RO CMMS – Work Orders</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='subtitle'>Handbook-based maintenance schedule with priorities, costs & completion tracking</div>",
+        unsafe_allow_html=True,
+    )
+
+    col_left, col_right = st.columns([1, 2])
+
+    with col_left:
+        st.subheader("Scheduler Control")
+        if st.button("Seed Master Tasks (from Handbook)"):
+            seed_maintenance_master()
+            st.success("Master tasks seeded / already present.")
+
+        st.write(f"CMMS start date: **{CMMS_START_DATE}**")
+        days_ahead = st.number_input("Generate schedule days ahead", 30, 730, 365, step=30)
+        if st.button("Generate / Refresh Schedule"):
+            seed_maintenance_master()
+            generate_cmms_schedule(CMMS_START_DATE, days_ahead=int(days_ahead))
+            st.success(f"Schedule generated from {CMMS_START_DATE} for {days_ahead} days.")
+
+    with col_right:
+        st.subheader("Overview")
+
+        today = datetime.date.today()
+        overdue = fetch_df(
+            "SELECT w.id, m.task_name, w.due_date, w.priority "
+            "FROM maintenance_workorders w "
+            "JOIN maintenance_master m ON w.master_id=m.id "
+            "WHERE w.status='Pending' AND w.due_date < %s "
+            "ORDER BY w.due_date",
+            (today,),
+        )
+        upcoming = fetch_df(
+            "SELECT w.id, m.task_name, w.due_date, w.priority "
+            "FROM maintenance_workorders w "
+            "JOIN maintenance_master m ON w.master_id=m.id "
+            "WHERE w.status='Pending' AND w.due_date BETWEEN %s AND %s "
+            "ORDER BY w.due_date",
+            (today, today + datetime.timedelta(days=14)),
+        )
+        completed = fetch_df(
+            "SELECT w.id, m.task_name, w.due_date, w.completion_date, w.cost "
+            "FROM maintenance_workorders w "
+            "JOIN maintenance_master m ON w.master_id=m.id "
+            "WHERE w.status='Completed' AND w.completion_date >= %s "
+            "ORDER BY w.completion_date DESC",
+            (today - datetime.timedelta(days=30),),
+        )
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Overdue", len(overdue))
+        with c2:
+            st.metric("Due in next 14 days", len(upcoming))
+        with c3:
+            st.metric("Completed last 30 days", len(completed))
+
+        tabs = st.tabs(["Overdue", "Upcoming", "Completed"])
+        with tabs[0]:
+            st.caption("Overdue Work Orders")
+            st.dataframe(overdue)
+        with tabs[1]:
+            st.caption("Upcoming Work Orders")
+            st.dataframe(upcoming)
+        with tabs[2]:
+            st.caption("Recently Completed")
+            st.dataframe(completed)
+
+    st.markdown("---")
+    st.subheader("Update Work Order")
+
+    open_df = fetch_df(
+        "SELECT w.id, m.task_name, w.due_date, w.priority, w.status "
+        "FROM maintenance_workorders w "
+        "JOIN maintenance_master m ON w.master_id=m.id "
+        "ORDER BY w.due_date"
+    )
+    if open_df.empty:
+        st.info("No work orders yet. Generate schedule first.")
+        return
+
+    open_df["label"] = open_df.apply(
+        lambda r: f"{r['id']} | {r['due_date']} | {r['task_name'][:40]}...", axis=1
+    )
+    selected_label = st.selectbox("Select Work Order", open_df["label"].tolist())
+    sel_id = int(selected_label.split("|")[0].strip())
+    sel_row = open_df[open_df["id"] == sel_id].iloc[0]
+
+    st.write(f"Task: **{sel_row['task_name']}**")
+    st.write(f"Due date: **{sel_row['due_date']}**")
+    status_new = st.selectbox("Status", ["Pending", "Completed", "Cancelled"], index=0)
+    priority_new = st.selectbox("Priority", ["Low", "Medium", "High", "Critical"], index=1)
+    tech = st.text_input("Technician", "")
+    est_hours = st.number_input("Estimated Hours", min_value=0.0, step=0.5, value=2.0)
+    act_hours = st.number_input("Actual Hours", min_value=0.0, step=0.5, value=0.0)
+    cost = st.number_input("Cost (USD)", min_value=0.0, step=1.0, value=0.0)
+    remarks = st.text_area("Remarks / Actions Taken", "")
+
+    if st.button("💾 Save Work Order Update"):
+        completion_date = datetime.date.today() if status_new == "Completed" else None
+        run_query(
+            """
+            UPDATE maintenance_workorders
+            SET status=%s, priority=%s, technician=%s,
+                estimated_hours=%s, actual_hours=%s, cost=%s,
+                completion_date=%s, remarks=%s
+            WHERE id=%s
+            """,
+            (
+                status_new,
+                priority_new,
+                tech or None,
+                est_hours,
+                act_hours or None,
+                cost or None,
+                completion_date,
+                remarks or None,
+                sel_id,
+            ),
+            fetch=False,
+        )
+        st.success("Work order updated.")
+
+
+# =========================
+# OPERATION MANUAL PAGE
+# =========================
+
+def page_operation_manual():
+    apply_theme()
+    st.markdown("<div class='top-title'>Operation & Maintenance Manual</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='subtitle'>Embedded quick-reference manual for operators (summary of handover handbook)</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.info(
+        "This page summarizes the main operating philosophy. "
+        "For full details keep the official O&M PDF stored with the project documents."
+    )
+
+    with st.expander("1. System Overview"):
+        st.markdown(
+            """
+            - Sea / feed water → pre-treatment (filters, dosing) → RO skid → product tank.  
+            - Critical monitored parameters:
+              - Feed & permeate **TDS**  
+              - **Pressure** (feed, HP, concentrate)  
+              - **Flow** (feed, permeate, reject)  
+              - Chemical dosing for **HCL**, **BC**, **Chlorine**.  
+            - Control via **PLC/HMI** with alarms for pressure, flows, tank levels and quality.
+            """
+        )
+
+    with st.expander("2. Start-up Procedure"):
+        st.markdown(
+            """
+            1. Confirm all isolation valves in normal position and product tank has space.  
+            2. Verify chemicals are available and dosing pumps primed (HCL, BC, Chlorine).  
+            3. Start feed pump and confirm stable suction & discharge pressure.  
+            4. Start high pressure pump; ramp up slowly to design pressure.  
+            5. Check permeate flow, reject flow and recovery percentage.  
+            6. Verify permeate TDS < 500 ppm before sending to service tank.
+            """
+        )
+
+    with st.expander("3. Normal Operation Checks"):
+        st.markdown(
+            """
+            - Monitor:
+              - RO inlet / outlet pressures and **ΔP across cartridge filters**.  
+              - Feed / permeate **TDS, pH, conductivity**.  
+              - Dosing rates for HCL / BC / Chlorine and chemical stock levels.  
+            - Follow **Daily / Weekly / Monthly** checklists in CMMS for inspections.  
+            - Record all readings in the app (production + water quality pages).
+            """
+        )
+
+    with st.expander("4. Shutdown Procedure"):
+        st.markdown(
+            """
+            - For short stops (<24h):
+              1. Stop HP pump, then feed pump.  
+              2. Keep system pressurized; avoid frequent on/off cycles.  
+
+            - For long stops (>24h):
+              1. Follow chemical preservation procedure as defined by the membrane supplier.  
+              2. Flush with low TDS water where available.  
+              3. Record preservation date in CMMS and plan re-commissioning.
+            """
+        )
+
+    with st.expander("5. Emergency & Alarms"):
+        st.markdown(
+            """
+            - **High pressure / low flow alarms:**  
+              - Check cartridge filter ΔP, feed strainers and HP pump condition.  
+            - **High product TDS:**  
+              - Investigate membrane fouling, scaling or damage; schedule cleaning or replacement.  
+            - **Chemical dosing failure:**  
+              - Switch to standby dosing pump where available; correct chemical tanks and lines.  
+
+            Always record emergency events in the **maintenance log** and raise work orders in the CMMS.
+            """
+        )
+
+
+# =========================
+# MAIN
+# =========================
 
 def main():
     st.set_page_config(page_title="Um Qasr RO System", layout="wide", page_icon="💧")
     apply_theme()
     init_db()
+    seed_maintenance_master()
 
     st.sidebar.title("Um Qasr RO System")
     page = st.sidebar.radio(
@@ -911,9 +1291,11 @@ def main():
             "Production Reports",
             "Chemical Movement",
             "Cartridge Filters",
-            "Maintenance Logs",
-            "System Status",
             "Water Quality",
+            "System Status",
+            "Maintenance Log",
+            "Maintenance CMMS",
+            "Operation Manual",
         ],
     )
 
@@ -927,12 +1309,16 @@ def main():
         page_chemicals()
     elif page == "Cartridge Filters":
         page_filters()
-    elif page == "Maintenance Logs":
-        page_maintenance()
-    elif page == "System Status":
-        page_system_status()
     elif page == "Water Quality":
         page_water_quality()
+    elif page == "System Status":
+        page_system_status()
+    elif page == "Maintenance Log":
+        page_maintenance_log()
+    elif page == "Maintenance CMMS":
+        page_cmms()
+    elif page == "Operation Manual":
+        page_operation_manual()
 
 
 if __name__ == "__main__":
